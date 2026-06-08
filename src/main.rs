@@ -1,6 +1,7 @@
 mod camera;
 mod contour;
 mod terrain;
+mod ui;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, Mesh, Mesh2d, PrimitiveTopology};
@@ -9,6 +10,7 @@ use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 use camera::{camera_control, CameraDrag};
 use contour::{marching_squares, ContourLevel};
 use terrain::{Terrain, WORLD_HALF};
+use ui::{regenerate_button, spawn_ui, update_status, RegenerateStatus};
 
 // ── world constants ──────────────────────────────────────────────
 const GRID_COLS: usize = 400;
@@ -20,12 +22,15 @@ const LINE_WIDTH: f32 = 50.0; // world units ≈ 1.5 px at default zoom
 #[derive(Resource)]
 struct ContourData {
     levels: Vec<ContourLevel>,
-    seed: u32,
 }
 
 /// Entities that hold the contour-line meshes (cleared on regeneration).
 #[derive(Resource, Default)]
 struct ContourEntities(Vec<Entity>);
+
+/// Resource flag — set to true to request terrain regeneration.
+#[derive(Resource, Default)]
+pub struct RegenerateRequest(pub bool);
 
 fn main() {
     App::new()
@@ -39,8 +44,10 @@ fn main() {
         }))
         .init_resource::<CameraDrag>()
         .init_resource::<ContourEntities>()
-        .add_systems(Startup, setup)
-        .add_systems(Update, (camera_control, regenerate_on_space))
+        .init_resource::<RegenerateStatus>()
+        .init_resource::<RegenerateRequest>()
+        .add_systems(Startup, (setup, spawn_ui))
+        .add_systems(Update, (camera_control, regenerate_on_request, regenerate_button, update_status))
         .run();
 }
 
@@ -62,7 +69,7 @@ fn setup(
     ));
 
     // initial terrain
-    let seed = 42;
+    let seed = rand::random::<u32>();
     let data = generate(seed);
     info!(
         "seed={}  levels={}  total-segments={}",
@@ -81,23 +88,25 @@ fn setup(
 
 // ── per-frame systems ────────────────────────────────────────────
 
-/// Press Space to regenerate with a new seed.
-fn regenerate_on_space(
-    keys: Res<ButtonInput<KeyCode>>,
+/// Respond to `RegenerateRequest` flag by rebuilding the terrain.
+fn regenerate_on_request(
+    mut request: ResMut<RegenerateRequest>,
     mut data: ResMut<ContourData>,
     mut commands: Commands,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut contour_entities: ResMut<ContourEntities>,
 ) {
-    if keys.just_pressed(KeyCode::Space) {
+    if request.0 {
+        request.0 = false;
+
         // drop old meshes
         for &entity in &contour_entities.0 {
             commands.entity(entity).try_despawn();
         }
         contour_entities.0.clear();
 
-        let new_seed = data.seed.wrapping_add(1);
+        let new_seed = rand::random::<u32>();
         *data = generate(new_seed);
         info!("regenerated — seed={}", new_seed);
 
@@ -125,7 +134,7 @@ fn generate(seed: u32) -> ContourData {
         GRID_ROWS,
         CONTOUR_INTERVAL,
     );
-    ContourData { levels, seed }
+    ContourData { levels }
 }
 
 fn spawn_contour_meshes(

@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 bevy = { version = "0.18.1", default-features = false, features = ["2d"] }
 noise = "0.9"
+rand = "0.8"
