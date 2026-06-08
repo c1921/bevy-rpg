@@ -183,7 +183,12 @@ fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<Image
     let h_min = hm.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
     let h_max = hm.data.iter().copied().reduce(f64::max).unwrap_or(1.0);
     let h_range = if (h_max - h_min) < 1e-12 { 1.0 } else { h_max - h_min };
-    hm.data.iter_mut().for_each(|v| *v = (*v - h_min) / h_range);
+    // Normalize to [0,1] then remap [0, 0.45] → [0.4, 0.45] to compress
+    // underwater relief before erosion, so erosion works on the remapped data.
+    hm.data.iter_mut().for_each(|v| {
+        let n = (*v - h_min) / h_range;
+        *v = if n <= 0.45 { 0.4 + n * (0.05 / 0.45) } else { n };
+    });
 
     // Hydraulic erosion.
     let config = erosion::ErosionConfig::default();
@@ -207,7 +212,7 @@ fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<Image
         &bg_f32,
         cols,
         rows,
-        0.45,              // sea_level
+        -0.2,              // sea_level
         0.9,               // snow_level
         [-0.2, -0.5, 0.7], // light_dir
         0.35,              // ambient
