@@ -8,11 +8,9 @@ use bevy::prelude::*;
 use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 use camera::{camera_control, CameraDrag};
 use contour::{marching_squares, ContourLevel};
-use terrain::Terrain;
+use terrain::{Terrain, WORLD_HALF};
 
 // ── world constants ──────────────────────────────────────────────
-const WORLD_SIZE: f64 = 50_000.0; // 50 km
-const WORLD_HALF: f64 = WORLD_SIZE / 2.0;
 const GRID_COLS: usize = 400;
 const GRID_ROWS: usize = 400;
 const CONTOUR_INTERVAL: f64 = 50.0; // metres

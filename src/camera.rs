@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use crate::terrain::WORLD_HALF;
 
 /// Resource tracking camera drag state.
 #[derive(Resource, Default)]
@@ -9,6 +10,7 @@ pub struct CameraDrag {
 
 /// Pan + zoom for a 2-D camera.
 pub fn camera_control(
+    time: Res<Time>,
     mut drag: ResMut<CameraDrag>,
     mut q_camera: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
     mouse_btn: Res<ButtonInput<MouseButton>>,
@@ -38,8 +40,9 @@ pub fn camera_control(
     if drag.dragging {
         if let (Some(pos), Some(last)) = (cursor, drag.last_mouse) {
             let delta = pos - last;
+            // screen-Y points down, world-Y points up — invert dy
             transform.translation.x -= delta.x * ortho.scale;
-            transform.translation.y -= delta.y * ortho.scale;
+            transform.translation.y += delta.y * ortho.scale;
         }
         drag.last_mouse = cursor;
     }
@@ -62,7 +65,8 @@ pub fn camera_control(
     }
 
     // ── WASD / arrow keyboard pan ─────────────────────────────
-    let pan_speed = 300.0 * ortho.scale;
+    const BASE_SPEED: f32 = 800.0;
+    let pan_speed = BASE_SPEED * ortho.scale * time.delta_secs();
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
         transform.translation.y += pan_speed;
     }
@@ -75,4 +79,11 @@ pub fn camera_control(
     if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
         transform.translation.x += pan_speed;
     }
+
+    // ── clamp to world bounds ─────────────────────────────────
+
+    let max_x = WORLD_HALF as f32;
+    let max_y = WORLD_HALF as f32;
+    transform.translation.x = transform.translation.x.clamp(-max_x, max_x);
+    transform.translation.y = transform.translation.y.clamp(-max_y, max_y);
 }
