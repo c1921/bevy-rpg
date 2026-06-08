@@ -1,5 +1,6 @@
 mod camera;
 mod contour;
+mod erosion;
 mod terrain;
 mod ui;
 
@@ -8,14 +9,14 @@ use bevy::mesh::{Indices, Mesh, Mesh2d, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 use camera::{camera_control, CameraDrag};
-use contour::{marching_squares, ContourLevel};
+use contour::{marching_squares_from_heights, ContourLevel};
 use terrain::{Terrain, WORLD_HALF};
 use ui::{regenerate_button, spawn_ui, update_status, RegenerateStatus};
 
 // ── world constants ──────────────────────────────────────────────
 const GRID_COLS: usize = 400;
 const GRID_ROWS: usize = 400;
-const CONTOUR_INTERVAL: f64 = 50.0; // metres
+const CONTOUR_INTERVAL: f64 = 200.0; // metres
 const LINE_WIDTH: f32 = 50.0; // world units ≈ 1.5 px at default zoom
 
 /// Cached contour data.
@@ -124,14 +125,52 @@ fn regenerate_on_request(
 
 fn generate(seed: u32) -> ContourData {
     let terrain = Terrain::new(seed);
-    let levels = marching_squares(
-        &terrain,
+
+    let dx = (WORLD_HALF - (-WORLD_HALF)) / GRID_COLS as f64;
+    let dy = (WORLD_HALF - (-WORLD_HALF)) / GRID_ROWS as f64;
+    let rows = GRID_ROWS + 1;
+    let cols = GRID_COLS + 1;
+
+    // Sample the continuous terrain into a discrete heightmap.
+    let mut hm = erosion::Heightmap::new(cols, rows, 0.0);
+    for r in 0..rows {
+        for c in 0..cols {
+            let wx = -WORLD_HALF + c as f64 * dx;
+            let wy = -WORLD_HALF + r as f64 * dy;
+            hm.set(c, r, terrain.height(wx, wy));
+        }
+    }
+
+    // Normalize to [0, 1] — erosion parameters are tuned for this range.
+    let h_min = hm.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
+    let h_max = hm.data.iter().copied().reduce(f64::max).unwrap_or(1.0);
+    let h_range = if (h_max - h_min) < 1e-12 { 1.0 } else { h_max - h_min };
+    hm.data.iter_mut().for_each(|v| *v = (*v - h_min) / h_range);
+
+    // Hydraulic erosion.
+    let config = erosion::ErosionConfig::default();
+    let simulator = erosion::ErosionSimulator::new(config);
+    simulator.simulate(&mut hm);
+
+    // Re‑normalize after erosion and scale back to [0, MAX_HEIGHT].
+    let h2_min = hm.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
+    let h2_max = hm.data.iter().copied().reduce(f64::max).unwrap_or(1.0);
+    let h2_range = if (h2_max - h2_min) < 1e-12 { 1.0 } else { h2_max - h2_min };
+    hm.data
+        .iter_mut()
+        .for_each(|v| *v = (*v - h2_min) / h2_range * terrain::MAX_HEIGHT);
+
+    // Convert back to row-major Vec<Vec<f64>> for contour extraction.
+    let heights: Vec<Vec<f64>> = (0..rows)
+        .map(|r| (0..cols).map(|c| hm.get(c, r)).collect())
+        .collect();
+
+    let levels = marching_squares_from_heights(
+        &heights,
         -WORLD_HALF,
         -WORLD_HALF,
-        WORLD_HALF,
-        WORLD_HALF,
-        GRID_COLS,
-        GRID_ROWS,
+        dx,
+        dy,
         CONTOUR_INTERVAL,
     );
     ContourData { levels }

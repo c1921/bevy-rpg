@@ -78,10 +78,25 @@ pub fn marching_squares(
         heights.push(row);
     }
 
+    marching_squares_from_heights(&heights, world_x_min, world_y_min, dx, dy, interval)
+}
+
+/// Extract contour polylines from a pre‑sampled 2-D height grid.
+///
+/// `heights[r][c]` is the elevation at row `r`, column `c`.
+/// `dx`, `dy` are the cell sizes in world units.
+pub fn marching_squares_from_heights(
+    heights: &[Vec<f64>],
+    world_x_min: f64,
+    world_y_min: f64,
+    dx: f64,
+    dy: f64,
+    interval: f64,
+) -> Vec<ContourLevel> {
     // ── elevation range ─────────────────────────────────────────
     let mut min_h = f64::MAX;
     let mut max_h = f64::MIN;
-    for row in &heights {
+    for row in heights {
         for &h in row {
             min_h = min_h.min(h);
             max_h = max_h.max(h);
@@ -97,7 +112,7 @@ pub fn marching_squares(
     let mut levels: Vec<ContourLevel> = Vec::new();
     let mut level = start_level;
     while level <= end_level + 1e-9 {
-        let segments = extract_segments(&heights, world_x_min, world_y_min, dx, dy, level);
+        let segments = extract_segments(heights, world_x_min, world_y_min, dx, dy, level);
         if !segments.is_empty() {
             let polylines = chain_segments(&segments);
             levels.push(ContourLevel {
