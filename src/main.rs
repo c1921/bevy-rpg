@@ -1,12 +1,14 @@
 mod camera;
 mod contour;
 mod erosion;
+mod render;
 mod terrain;
 mod ui;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, Mesh, Mesh2d, PrimitiveTopology};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 use camera::{camera_control, CameraDrag};
 use contour::{marching_squares_from_heights, ContourLevel};
@@ -18,6 +20,7 @@ const GRID_COLS: usize = 400;
 const GRID_ROWS: usize = 400;
 const CONTOUR_INTERVAL: f64 = 200.0; // metres
 const LINE_WIDTH: f32 = 50.0; // world units ≈ 1.5 px at default zoom
+const WORLD_SIZE: f32 = (terrain::WORLD_HALF as f32) * 2.0; // 50 000
 
 /// Cached contour data.
 #[derive(Resource)]
@@ -32,6 +35,10 @@ struct ContourEntities(Vec<Entity>);
 /// Resource flag — set to true to request terrain regeneration.
 #[derive(Resource, Default)]
 pub struct RegenerateRequest(pub bool);
+
+/// Marker for the background heightmap sprite.
+#[derive(Component)]
+struct Background;
 
 fn main() {
     App::new()
@@ -56,6 +63,7 @@ fn main() {
 
 fn setup(
     mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut contour_entities: ResMut<ContourEntities>,
@@ -71,7 +79,7 @@ fn setup(
 
     // initial terrain
     let seed = rand::random::<u32>();
-    let data = generate(seed);
+    let (data, bg_handle) = generate(seed, &mut images);
     info!(
         "seed={}  levels={}  total-segments={}",
         seed,
@@ -82,7 +90,18 @@ fn setup(
             .sum::<usize>(),
     );
 
-    // spawn mesh entities
+    // background heightmap sprite
+    commands.spawn((
+        Sprite {
+            image: bg_handle,
+            custom_size: Some(Vec2::new(WORLD_SIZE, WORLD_SIZE)),
+            ..default()
+        },
+        Transform::from_xyz(0.0, 0.0, -1.0),
+        Background,
+    ));
+
+    // spawn contour mesh entities
     spawn_contour_meshes(&data, &mut commands, &mut materials, &mut meshes, &mut contour_entities);
     commands.insert_resource(data);
 }
@@ -94,9 +113,11 @@ fn regenerate_on_request(
     mut request: ResMut<RegenerateRequest>,
     mut data: ResMut<ContourData>,
     mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut contour_entities: ResMut<ContourEntities>,
+    bg_query: Query<Entity, With<Background>>,
 ) {
     if request.0 {
         request.0 = false;
@@ -107,9 +128,26 @@ fn regenerate_on_request(
         }
         contour_entities.0.clear();
 
+        // drop old background
+        if let Ok(entity) = bg_query.single() {
+            commands.entity(entity).despawn();
+        }
+
         let new_seed = rand::random::<u32>();
-        *data = generate(new_seed);
+        let (new_data, bg_handle) = generate(new_seed, &mut images);
+        *data = new_data;
         info!("regenerated — seed={}", new_seed);
+
+        // re‑spawn background
+        commands.spawn((
+            Sprite {
+                image: bg_handle,
+                custom_size: Some(Vec2::new(WORLD_SIZE, WORLD_SIZE)),
+                ..default()
+            },
+            Transform::from_xyz(0.0, 0.0, -1.0),
+            Background,
+        ));
 
         spawn_contour_meshes(
             &data,
@@ -123,7 +161,7 @@ fn regenerate_on_request(
 
 // ── helpers ──────────────────────────────────────────────────────
 
-fn generate(seed: u32) -> ContourData {
+fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<Image>) {
     let terrain = Terrain::new(seed);
 
     let dx = (WORLD_HALF - (-WORLD_HALF)) / GRID_COLS as f64;
@@ -152,10 +190,43 @@ fn generate(seed: u32) -> ContourData {
     let simulator = erosion::ErosionSimulator::new(config);
     simulator.simulate(&mut hm);
 
-    // Re‑normalize after erosion and scale back to [0, MAX_HEIGHT].
+    // Re‑normalize after erosion to strict [0,1].
     let h2_min = hm.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
     let h2_max = hm.data.iter().copied().reduce(f64::max).unwrap_or(1.0);
     let h2_range = if (h2_max - h2_min) < 1e-12 { 1.0 } else { h2_max - h2_min };
+
+    // Clone a [0,1] f32 copy for background rendering.
+    let bg_f32: Vec<f32> = hm
+        .data
+        .iter()
+        .map(|&v| ((v - h2_min) / h2_range).clamp(0.0, 1.0) as f32)
+        .collect();
+
+    // Render pseudo‑3D background image.
+    let bg_pixels = render::render_heightmap(
+        &bg_f32,
+        cols,
+        rows,
+        0.45,              // sea_level
+        0.9,               // snow_level
+        [-0.2, -0.5, 0.7], // light_dir
+        0.35,              // ambient
+        6.0,               // normal_strength
+    );
+    let bg_image = Image::new(
+        Extent3d {
+            width: cols as u32,
+            height: rows as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        bg_pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    let bg_handle = images.add(bg_image);
+
+    // Scale to [0, MAX_HEIGHT] for contour extraction.
     hm.data
         .iter_mut()
         .for_each(|v| *v = (*v - h2_min) / h2_range * terrain::MAX_HEIGHT);
@@ -173,7 +244,7 @@ fn generate(seed: u32) -> ContourData {
         dy,
         CONTOUR_INTERVAL,
     );
-    ContourData { levels }
+    (ContourData { levels }, bg_handle)
 }
 
 fn spawn_contour_meshes(
