@@ -12,12 +12,25 @@ pub fn simple_gradient(hm: &Heightmap) -> Gradient {
     let w = hm.width;
     let h = hm.height;
     let n = w * h;
-    let mut real = vec![0.0_f64; n];
-    let mut imag = vec![0.0_f64; n];
+    let mut g = Gradient {
+        real: vec![0.0_f64; n],
+        imag: vec![0.0_f64; n],
+        width: w,
+        height: h,
+    };
+    simple_gradient_into(hm, &mut g);
+    g
+}
+
+/// Fill `out` with the gradient of `hm` — reuses caller‑supplied buffers.
+pub fn simple_gradient_into(hm: &Heightmap, out: &mut Gradient) {
+    let w = hm.width;
+    let h = hm.height;
 
     // Write directly into pre‑allocated buffers via parallel chunks.
-    real.par_chunks_mut(w)
-        .zip(imag.par_chunks_mut(w))
+    out.real
+        .par_chunks_mut(w)
+        .zip(out.imag.par_chunks_mut(w))
         .enumerate()
         .for_each(|(y, (r_row, i_row))| {
             let ym1 = ((y as i64 - 1).rem_euclid(h as i64)) as usize;
@@ -31,8 +44,6 @@ pub fn simple_gradient(hm: &Heightmap) -> Gradient {
                 r_row[x] = 0.5 * (hm.get(xm1, y) - hm.get(xp1, y));
             }
         });
-
-    Gradient { real, imag, width: w, height: h }
 }
 
 /// Bilinear sample every cell at offset `(off_real, off_imag)` from
@@ -65,12 +76,28 @@ pub fn sample(hm: &Heightmap, off_real: &[f64], off_imag: &[f64]) -> Heightmap {
 /// `grad_real`, `grad_imag` should be a **unit** vector field (as
 /// produced by normalising `Gradient`).
 pub fn displace(source: &Heightmap, grad_real: &[f64], grad_imag: &[f64]) -> Heightmap {
-    let w = source.width;
-    let h = source.height;
-    let mut out = Heightmap::new(w, h, 0.0);
+    let mut out = Heightmap::new(source.width, source.height, 0.0);
+    displace_into(
+        &source.data,
+        grad_real,
+        grad_imag,
+        source.width,
+        source.height,
+        &mut out.data,
+    );
+    out
+}
 
-    out.data
-        .par_iter_mut()
+/// Fill `dst` with advected values — reuses caller‑supplied buffer.
+pub fn displace_into(
+    src: &[f64],
+    grad_real: &[f64],
+    grad_imag: &[f64],
+    w: usize,
+    h: usize,
+    dst: &mut [f64],
+) {
+    dst.par_iter_mut()
         .enumerate()
         .for_each(|(idx, val)| {
             let i = idx / w; // row (y)
@@ -97,31 +124,29 @@ pub fn displace(source: &Heightmap, grad_real: &[f64], grad_imag: &[f64]) -> Hei
 
             // Weights: for each source cell, compute from its gradient.
             // Flow direction is FROM source TOWARD target (i,j).
-            let w00 = wgt(grad_real[s00], grad_imag[s00],  1,  1);
-            let w01 = wgt(grad_real[s01], grad_imag[s01],  0,  1);
-            let w02 = wgt(grad_real[s02], grad_imag[s02], -1,  1);
-            let w10 = wgt(grad_real[s10], grad_imag[s10],  1,  0);
-            let w11 = wgt(grad_real[s11], grad_imag[s11],  0,  0);
-            let w12 = wgt(grad_real[s12], grad_imag[s12], -1,  0);
-            let w20 = wgt(grad_real[s20], grad_imag[s20],  1, -1);
-            let w21 = wgt(grad_real[s21], grad_imag[s21],  0, -1);
+            let w00 = wgt(grad_real[s00], grad_imag[s00], 1, 1);
+            let w01 = wgt(grad_real[s01], grad_imag[s01], 0, 1);
+            let w02 = wgt(grad_real[s02], grad_imag[s02], -1, 1);
+            let w10 = wgt(grad_real[s10], grad_imag[s10], 1, 0);
+            let w11 = wgt(grad_real[s11], grad_imag[s11], 0, 0);
+            let w12 = wgt(grad_real[s12], grad_imag[s12], -1, 0);
+            let w20 = wgt(grad_real[s20], grad_imag[s20], 1, -1);
+            let w21 = wgt(grad_real[s21], grad_imag[s21], 0, -1);
             let w22 = wgt(grad_real[s22], grad_imag[s22], -1, -1);
 
             let mut accum = 0.0;
-            accum += w00 * source.data[s00];
-            accum += w01 * source.data[s01];
-            accum += w02 * source.data[s02];
-            accum += w10 * source.data[s10];
-            accum += w11 * source.data[s11];
-            accum += w12 * source.data[s12];
-            accum += w20 * source.data[s20];
-            accum += w21 * source.data[s21];
-            accum += w22 * source.data[s22];
+            accum += w00 * src[s00];
+            accum += w01 * src[s01];
+            accum += w02 * src[s02];
+            accum += w10 * src[s10];
+            accum += w11 * src[s11];
+            accum += w12 * src[s12];
+            accum += w20 * src[s20];
+            accum += w21 * src[s21];
+            accum += w22 * src[s22];
 
             *val = accum;
         });
-
-    out
 }
 
 /// Weight for flow direction `(dx, dy)` given gradient `(v_real, v_imag)`.
@@ -138,6 +163,28 @@ fn wgt(v_real: f64, v_imag: f64, dx: i64, dy: i64) -> f64 {
         _ => v_imag.max(0.0),
     };
     wx * wy
+}
+
+/// Fused downhill sample + delta: `out[i] = hm[i] - hm.sample_bilinear(col+grad_real, row+grad_imag)`.
+///
+/// Eliminates the intermediate `off_real` / `off_imag` / neighbour arrays.
+pub fn sample_downhill_delta(
+    hm: &Heightmap,
+    grad_real: &[f64],
+    grad_imag: &[f64],
+    out: &mut [f64],
+) {
+    let w = hm.width;
+    out.par_iter_mut()
+        .enumerate()
+        .for_each(|(idx, d)| {
+            let y = idx / w;
+            let x = idx % w;
+            // Downhill = follow gradient: sample at (col + grad_real, row + grad_imag).
+            let sx = x as f64 + grad_real[idx];
+            let sy = y as f64 + grad_imag[idx];
+            *d = hm.data[idx] - hm.sample_bilinear(sx, sy);
+        });
 }
 
 /// Precompute a 1‑D Gaussian kernel with periodic wrap.
@@ -265,16 +312,23 @@ impl ErosionSimulator {
         let mut water = vec![0.0f64; n];
         let mut velocity = vec![0.0f64; n];
 
+        // ── Pre‑allocated scratch buffers (reused every iteration) ──
+        let mut grad = simple_gradient(terrain); // allocate once, reuse
+        let mut height_delta = vec![0.0_f64; n];
+        let mut sediment_cap = vec![0.0_f64; n];
+        let mut deposited = vec![0.0_f64; n];
+        let mut sediment_tmp = vec![0.0_f64; n];
+        let mut water_tmp = vec![0.0_f64; n];
+
         for _iter in 0..cfg.iterations {
             // ── 1. Rain ────────────────────────────────────────
             water
                 .par_iter_mut()
                 .for_each(|v| *v += rand::random::<f64>() * cfg.rain_rate * cell_area);
 
-            // ── 2. Gradient (original sign convention) ────────
-            let mut grad = simple_gradient(terrain);
+            // ── 2. Gradient + normalise ───────────────────────
+            simple_gradient_into(terrain, &mut grad);
 
-            // Normalise to unit vectors; zero vectors → random direction
             let two_pi = 2.0 * std::f64::consts::PI;
             grad.real
                 .par_iter_mut()
@@ -292,21 +346,10 @@ impl ErosionSimulator {
                     }
                 });
 
-            // ── 3. Height delta — sample downhill (-gradient) ─
-            let off_real: Vec<f64> = grad.real.par_iter().map(|v| -v).collect();
-            let off_imag: Vec<f64> = grad.imag.par_iter().map(|v| -v).collect();
-            let neighbour = sample(terrain, &off_real, &off_imag);
-
-            // height_delta = terrain - neighbour  (positive = downhill)
-            let mut height_delta = vec![0.0_f64; n];
-            height_delta
-                .par_iter_mut()
-                .zip(terrain.data.par_iter())
-                .zip(neighbour.data.par_iter())
-                .for_each(|((hd, t), n)| *hd = *t - n);
+            // ── 3. Height delta (fused: no off_real/off_imag/neighbour) ─
+            sample_downhill_delta(terrain, &grad.real, &grad.imag, &mut height_delta);
 
             // ── 4. Sediment capacity ──────────────────────────
-            let mut sediment_cap = vec![0.0_f64; n];
             sediment_cap
                 .par_iter_mut()
                 .zip(height_delta.par_iter())
@@ -318,7 +361,6 @@ impl ErosionSimulator {
                 });
 
             // ── 5. Deposit / erode ────────────────────────────
-            let mut deposited = vec![0.0f64; n];
             deposited
                 .par_iter_mut()
                 .zip(height_delta.par_iter())
@@ -351,26 +393,10 @@ impl ErosionSimulator {
                 .for_each(|(t, d)| *t += d);
 
             // ── 7. Advect sediment & water along gradient ─────
-            sediment = displace(
-                &Heightmap {
-                    data: sediment,
-                    width: w,
-                    height: h,
-                },
-                &grad.real,
-                &grad.imag,
-            )
-            .data;
-            water = displace(
-                &Heightmap {
-                    data: water,
-                    width: w,
-                    height: h,
-                },
-                &grad.real,
-                &grad.imag,
-            )
-            .data;
+            displace_into(&sediment, &grad.real, &grad.imag, w, h, &mut sediment_tmp);
+            std::mem::swap(&mut sediment, &mut sediment_tmp);
+            displace_into(&water, &grad.real, &grad.imag, w, h, &mut water_tmp);
+            std::mem::swap(&mut water, &mut water_tmp);
 
             // ── 8. Slope slippage (thermal erosion) ───────────
             if _iter % cfg.slippage_interval == 0 {
