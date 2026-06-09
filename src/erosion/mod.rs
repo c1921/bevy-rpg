@@ -5,6 +5,6 @@ pub mod simulator;
 pub use heightmap::{Gradient, Heightmap};
 #[allow(unused_imports)]
 pub use simulator::{
-    displace, gaussian_blur, gaussian_kernel_1d, sample, simple_gradient, ErosionConfig,
-    ErosionSimulator,
+    displace_into, gaussian_blur, gaussian_kernel_1d, sample_downhill_delta, simple_gradient,
+    simple_gradient_into, ErosionConfig, ErosionSimulator,
 };

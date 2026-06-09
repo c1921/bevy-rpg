@@ -46,47 +46,7 @@ pub fn simple_gradient_into(hm: &Heightmap, out: &mut Gradient) {
         });
 }
 
-/// Bilinear sample every cell at offset `(off_real, off_imag)` from
-/// its own position.  Returns a new `Heightmap`.
-///
-/// `off_real[j + i * w]` is subtracted from the column coordinate,
-/// `off_imag[j + i * w]` from the row coordinate.
-pub fn sample(hm: &Heightmap, off_real: &[f64], off_imag: &[f64]) -> Heightmap {
-    let w = hm.width;
-    let h = hm.height;
-    let mut out = Heightmap::new(w, h, 0.0);
 
-    out.data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(idx, val)| {
-            let y = idx / w;
-            let x = idx % w;
-            let sx = x as f64 - off_real[idx];
-            let sy = y as f64 - off_imag[idx];
-            *val = hm.sample_bilinear(sx, sy);
-        });
-
-    out
-}
-
-/// Semi‑Lagrangian advection: each output cell gathers from its 8
-/// neighbours weighted by the source cell's gradient direction.
-///
-/// `grad_real`, `grad_imag` should be a **unit** vector field (as
-/// produced by normalising `Gradient`).
-pub fn displace(source: &Heightmap, grad_real: &[f64], grad_imag: &[f64]) -> Heightmap {
-    let mut out = Heightmap::new(source.width, source.height, 0.0);
-    displace_into(
-        &source.data,
-        grad_real,
-        grad_imag,
-        source.width,
-        source.height,
-        &mut out.data,
-    );
-    out
-}
 
 /// Fill `dst` with advected values — reuses caller‑supplied buffer.
 pub fn displace_into(

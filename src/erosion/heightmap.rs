@@ -22,11 +22,6 @@ impl Heightmap {
         self.data[y * self.width + x]
     }
 
-    #[inline]
-    pub fn set(&mut self, x: usize, y: usize, val: f64) {
-        self.data[y * self.width + x] = val;
-    }
-
     /// Wrap an integer column index into [0, width).
     #[inline]
     pub fn wrap_x(&self, x: i64) -> usize {
