@@ -25,21 +25,27 @@ pub(crate) fn apply_lighting(
 pub(crate) fn coastline_mask(ocean: &[bool], w: usize, h: usize) -> Vec<bool> {
     let n = w * h;
     let mut coast = vec![false; n];
-    for y in 0..h {
-        let ym1 = if y == 0 { h - 1 } else { y - 1 };
-        let yp1 = if y + 1 == h { 0 } else { y + 1 };
-        for x in 0..w {
-            let xm1 = if x == 0 { w - 1 } else { x - 1 };
-            let xp1 = if x + 1 == w { 0 } else { x + 1 };
-            let idx = y * w + x;
-            if ocean[idx] {
-                continue;
+
+    use rayon::prelude::*;
+    coast
+        .par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, row_out)| {
+            let ym1 = if y == 0 { h - 1 } else { y - 1 };
+            let yp1 = if y + 1 == h { 0 } else { y + 1 };
+            for x in 0..w {
+                let xm1 = if x == 0 { w - 1 } else { x - 1 };
+                let xp1 = if x + 1 == w { 0 } else { x + 1 };
+                let idx = y * w + x;
+                if ocean[idx] {
+                    continue;
+                }
+                // land pixel — check 4 neighbours
+                if ocean[ym1 * w + x] || ocean[yp1 * w + x] || ocean[y * w + xm1] || ocean[y * w + xp1] {
+                    row_out[x] = true;
+                }
             }
-            // land pixel — check 4 neighbours
-            if ocean[ym1 * w + x] || ocean[yp1 * w + x] || ocean[y * w + xm1] || ocean[y * w + xp1] {
-                coast[idx] = true;
-            }
-        }
-    }
+        });
+
     coast
 }

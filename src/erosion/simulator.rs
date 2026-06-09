@@ -12,17 +12,16 @@ pub fn simple_gradient(hm: &Heightmap) -> Gradient {
     let w = hm.width;
     let h = hm.height;
     let n = w * h;
-    let mut real = Vec::with_capacity(n);
-    let mut imag = Vec::with_capacity(n);
+    let mut real = vec![0.0_f64; n];
+    let mut imag = vec![0.0_f64; n];
 
-    // Collect into Vec by iterating rows in parallel.
-    let pairs: Vec<(Vec<f64>, Vec<f64>)> = (0..h)
-        .into_par_iter()
-        .map(|y| {
+    // Write directly into pre‑allocated buffers via parallel chunks.
+    real.par_chunks_mut(w)
+        .zip(imag.par_chunks_mut(w))
+        .enumerate()
+        .for_each(|(y, (r_row, i_row))| {
             let ym1 = ((y as i64 - 1).rem_euclid(h as i64)) as usize;
             let yp1 = (y + 1) % h;
-            let mut r_row = vec![0.0; w];
-            let mut i_row = vec![0.0; w];
             for x in 0..w {
                 let xm1 = ((x as i64 - 1).rem_euclid(w as i64)) as usize;
                 let xp1 = (x + 1) % w;
@@ -31,14 +30,7 @@ pub fn simple_gradient(hm: &Heightmap) -> Gradient {
                 // dy = 0.5*(a[i, j-1] - a[i, j+1])  → real
                 r_row[x] = 0.5 * (hm.get(xm1, y) - hm.get(xp1, y));
             }
-            (r_row, i_row)
-        })
-        .collect();
-
-    for (r, i) in pairs {
-        real.extend(r);
-        imag.extend(i);
-    }
+        });
 
     Gradient { real, imag, width: w, height: h }
 }
@@ -84,44 +76,68 @@ pub fn displace(source: &Heightmap, grad_real: &[f64], grad_imag: &[f64]) -> Hei
             let i = idx / w; // row (y)
             let j = idx % w; // col (x)
 
+            // Pre‑compute neighbour row/col indices with wrap.
+            let ii_neg = ((i as i64 - 1).rem_euclid(h as i64)) as usize;
+            let ii_zer = i;
+            let ii_pos = (i + 1) % h;
+            let jj_neg = ((j as i64 - 1).rem_euclid(w as i64)) as usize;
+            let jj_zer = j;
+            let jj_pos = (j + 1) % w;
+
+            // Source neighbour indices (row-major).
+            let s00 = ii_neg * w + jj_neg;
+            let s01 = ii_neg * w + jj_zer;
+            let s02 = ii_neg * w + jj_pos;
+            let s10 = ii_zer * w + jj_neg;
+            let s11 = ii_zer * w + jj_zer;
+            let s12 = ii_zer * w + jj_pos;
+            let s20 = ii_pos * w + jj_neg;
+            let s21 = ii_pos * w + jj_zer;
+            let s22 = ii_pos * w + jj_pos;
+
+            // Weights: for each source cell, compute from its gradient.
+            // Flow direction is FROM source TOWARD target (i,j).
+            let w00 = wgt(grad_real[s00], grad_imag[s00],  1,  1);
+            let w01 = wgt(grad_real[s01], grad_imag[s01],  0,  1);
+            let w02 = wgt(grad_real[s02], grad_imag[s02], -1,  1);
+            let w10 = wgt(grad_real[s10], grad_imag[s10],  1,  0);
+            let w11 = wgt(grad_real[s11], grad_imag[s11],  0,  0);
+            let w12 = wgt(grad_real[s12], grad_imag[s12], -1,  0);
+            let w20 = wgt(grad_real[s20], grad_imag[s20],  1, -1);
+            let w21 = wgt(grad_real[s21], grad_imag[s21],  0, -1);
+            let w22 = wgt(grad_real[s22], grad_imag[s22], -1, -1);
+
             let mut accum = 0.0;
-
-            // 9 neighbours: dx, dy ∈ {-1, 0, 1}
-            for dx in -1i64..=1 {
-                for dy in -1i64..=1 {
-                    // source cell coordinates
-                    let ii = ((i as i64 - dy).rem_euclid(h as i64)) as usize;
-                    let jj = ((j as i64 - dx).rem_euclid(w as i64)) as usize;
-                    let src_idx = ii * w + jj;
-
-                    let v_real = grad_real[src_idx];
-                    let v_imag = grad_imag[src_idx];
-
-                    // weight in x direction
-                    let wx = match dx {
-                        -1 => (-v_real).max(0.0),
-                        0 => 1.0 - v_real.abs(),
-                        _ => v_real.max(0.0), // dx == 1
-                    };
-
-                    // weight in y direction
-                    let wy = match dy {
-                        -1 => (-v_imag).max(0.0),
-                        0 => 1.0 - v_imag.abs(),
-                        _ => v_imag.max(0.0), // dy == 1
-                    };
-
-                    let wgt = wx * wy;
-                    if wgt > 0.0 {
-                        accum += wgt * source.data[src_idx];
-                    }
-                }
-            }
+            accum += w00 * source.data[s00];
+            accum += w01 * source.data[s01];
+            accum += w02 * source.data[s02];
+            accum += w10 * source.data[s10];
+            accum += w11 * source.data[s11];
+            accum += w12 * source.data[s12];
+            accum += w20 * source.data[s20];
+            accum += w21 * source.data[s21];
+            accum += w22 * source.data[s22];
 
             *val = accum;
         });
 
     out
+}
+
+/// Weight for flow direction `(dx, dy)` given gradient `(v_real, v_imag)`.
+#[inline]
+fn wgt(v_real: f64, v_imag: f64, dx: i64, dy: i64) -> f64 {
+    let wx = match dx {
+        -1 => (-v_real).max(0.0),
+        0 => 1.0 - v_real.abs(),
+        _ => v_real.max(0.0),
+    };
+    let wy = match dy {
+        -1 => (-v_imag).max(0.0),
+        0 => 1.0 - v_imag.abs(),
+        _ => v_imag.max(0.0),
+    };
+    wx * wy
 }
 
 /// Precompute a 1‑D Gaussian kernel with periodic wrap.
@@ -201,6 +217,9 @@ pub struct ErosionConfig {
     pub dissolving_rate: f64,
     pub deposition_rate: f64,
     pub cell_width: f64,
+    /// Run slope slippage (gaussian blur) every N iterations.
+    /// 1 = every iteration, 3 = every 3rd iteration. Default: 3.
+    pub slippage_interval: usize,
 }
 
 impl Default for ErosionConfig {
@@ -216,6 +235,7 @@ impl Default for ErosionConfig {
             dissolving_rate: 0.4,
             deposition_rate: 0.0005,
             cell_width: 1.0,
+            slippage_interval: 3,
         }
     }
 }
@@ -273,27 +293,27 @@ impl ErosionSimulator {
                 });
 
             // ── 3. Height delta — sample downhill (-gradient) ─
-            let mut off_real = grad.real.clone();
-            let mut off_imag = grad.imag.clone();
-            off_real.par_iter_mut().for_each(|v| *v = -*v);
-            off_imag.par_iter_mut().for_each(|v| *v = -*v);
+            let off_real: Vec<f64> = grad.real.par_iter().map(|v| -v).collect();
+            let off_imag: Vec<f64> = grad.imag.par_iter().map(|v| -v).collect();
             let neighbour = sample(terrain, &off_real, &off_imag);
 
             // height_delta = terrain - neighbour  (positive = downhill)
-            let mut height_delta = terrain.data.clone();
+            let mut height_delta = vec![0.0_f64; n];
             height_delta
                 .par_iter_mut()
+                .zip(terrain.data.par_iter())
                 .zip(neighbour.data.par_iter())
-                .for_each(|(t, n)| *t -= n);
+                .for_each(|((hd, t), n)| *hd = *t - n);
 
             // ── 4. Sediment capacity ──────────────────────────
-            let mut sediment_cap = height_delta.clone();
+            let mut sediment_cap = vec![0.0_f64; n];
             sediment_cap
                 .par_iter_mut()
+                .zip(height_delta.par_iter())
                 .zip(velocity.par_iter())
                 .zip(water.par_iter())
-                .for_each(|((cap, vel), wat)| {
-                    let hd = cap.max(cfg.min_height_delta);
+                .for_each(|(((cap, hd), vel), wat)| {
+                    let hd = hd.max(cfg.min_height_delta);
                     *cap = hd / cfg.cell_width * *vel * *wat * cfg.sediment_capacity_constant;
                 });
 
@@ -353,7 +373,9 @@ impl ErosionSimulator {
             .data;
 
             // ── 8. Slope slippage (thermal erosion) ───────────
-            apply_slippage(terrain, cfg);
+            if _iter % cfg.slippage_interval == 0 {
+                apply_slippage(terrain, cfg);
+            }
 
             // ── 9. Update velocity ────────────────────────────
             velocity

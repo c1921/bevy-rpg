@@ -95,6 +95,7 @@ pub fn marching_squares_from_heights(
 /// Extract contour polylines from a flat height slice (row-major).
 ///
 /// `heights.len() == cols * rows`.  Avoids the `Vec<Vec<f64>>` conversion.
+/// Levels are processed in parallel via rayon.
 pub fn marching_squares_from_flat(
     heights: &[f64],
     cols: usize,
@@ -118,19 +119,30 @@ pub fn marching_squares_from_flat(
         return Vec::new();
     }
 
-    let mut levels: Vec<ContourLevel> = Vec::new();
+    // Collect level elevations.
+    let mut elevations: Vec<f64> = Vec::new();
     let mut level = start_level;
     while level <= end_level + 1e-9 {
-        let segments = extract_segments_flat(heights, cols, rows, world_x_min, world_y_min, dx, dy, level);
-        if !segments.is_empty() {
-            let polylines = chain_segments(&segments);
-            levels.push(ContourLevel {
-                elevation: level,
-                polylines,
-            });
-        }
+        elevations.push(level);
         level += interval;
     }
 
-    levels
+    // Process each level in parallel.
+    use rayon::prelude::*;
+    elevations
+        .par_iter()
+        .filter_map(|&elev| {
+            let segments =
+                extract_segments_flat(heights, cols, rows, world_x_min, world_y_min, dx, dy, elev);
+            if segments.is_empty() {
+                None
+            } else {
+                let polylines = chain_segments(&segments);
+                Some(ContourLevel {
+                    elevation: elev,
+                    polylines,
+                })
+            }
+        })
+        .collect()
 }

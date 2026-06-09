@@ -11,6 +11,8 @@ use crate::terrain::Terrain;
 
 /// Generate a new terrain heightmap, background image, and contour data.
 pub fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<Image>) {
+    let t_total = std::time::Instant::now();
+
     let terrain = Terrain::new(seed);
 
     let dx = (WORLD_HALF - (-WORLD_HALF)) / GRID_COLS as f64;
@@ -19,14 +21,17 @@ pub fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<I
     let cols = GRID_COLS + 1;
 
     // Sample the continuous terrain into a discrete heightmap.
+    let t_noise = std::time::Instant::now();
     let mut hm = crate::erosion::Heightmap::new(cols, rows, 0.0);
-    for r in 0..rows {
-        for c in 0..cols {
-            let wx = -WORLD_HALF + c as f64 * dx;
-            let wy = -WORLD_HALF + r as f64 * dy;
-            hm.set(c, r, terrain.height(wx, wy));
-        }
-    }
+    use rayon::prelude::*;
+    hm.data.par_iter_mut().enumerate().for_each(|(idx, v)| {
+        let r = idx / cols;
+        let c = idx % cols;
+        let wx = -WORLD_HALF + c as f64 * dx;
+        let wy = -WORLD_HALF + r as f64 * dy;
+        *v = terrain.height(wx, wy);
+    });
+    let noise_ms = t_noise.elapsed().as_millis();
 
     // Normalize to [0, 1] — erosion parameters are tuned for this range.
     let h_min = hm.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
@@ -40,9 +45,11 @@ pub fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<I
     });
 
     // Hydraulic erosion.
+    let t_erosion = std::time::Instant::now();
     let config = crate::erosion::ErosionConfig::default();
     let simulator = crate::erosion::ErosionSimulator::new(config);
     simulator.simulate(&mut hm);
+    let erosion_ms = t_erosion.elapsed().as_millis();
 
     // Re-normalize after erosion to strict [0,1].
     let h2_min = hm.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
@@ -57,6 +64,7 @@ pub fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<I
         .collect();
 
     // Render pseudo-3D background image.
+    let t_render = std::time::Instant::now();
     let bg_pixels = crate::render::render_heightmap(
         &bg_f32,
         cols,
@@ -79,6 +87,7 @@ pub fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<I
         RenderAssetUsages::default(),
     );
     let bg_handle = images.add(bg_image);
+    let render_ms = t_render.elapsed().as_millis();
 
     // Scale to [0, MAX_HEIGHT] for contour extraction.
     hm.data
@@ -86,6 +95,7 @@ pub fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<I
         .for_each(|v| *v = (*v - h2_min) / h2_range * MAX_HEIGHT);
 
     // Use flat heightmap data directly for contour extraction (no Vec<Vec<f64>> conversion).
+    let t_contour = std::time::Instant::now();
     let levels = marching_squares_from_flat(
         &hm.data,
         cols,
@@ -96,6 +106,14 @@ pub fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<I
         dy,
         CONTOUR_INTERVAL,
     );
+    let contour_ms = t_contour.elapsed().as_millis();
+
+    let total_ms = t_total.elapsed().as_millis();
+    info!(
+        "generate seed={}: noise={}ms  erosion={}ms  render={}ms  contour={}ms  total={}ms",
+        seed, noise_ms, erosion_ms, render_ms, contour_ms, total_ms
+    );
+
     (ContourData { levels }, bg_handle)
 }
 
