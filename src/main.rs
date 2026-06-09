@@ -16,8 +16,8 @@ use terrain::{Terrain, WORLD_HALF};
 use ui::{regenerate_button, spawn_ui, toggle_render_mode, update_status, RegenerateStatus};
 
 // ── world constants ──────────────────────────────────────────────
-const GRID_COLS: usize = 400;
-const GRID_ROWS: usize = 400;
+const GRID_COLS: usize = 800;
+const GRID_ROWS: usize = 800;
 const CONTOUR_INTERVAL: f64 = 200.0; // metres
 const LINE_WIDTH: f32 = 50.0; // world units ≈ 1.5 px at default zoom
 const WORLD_SIZE: f32 = (terrain::WORLD_HALF as f32) * 2.0; // 50 000
