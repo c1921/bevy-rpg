@@ -1,17 +1,14 @@
 use bevy::prelude::*;
 
-use crate::config::WORLD_SIZE;
 use crate::generation;
-use crate::resources::{Background, ContourData, ContourEntities, RegenerateRequest, RenderMode};
+use crate::resources::{
+    Background, ContourEntities, GenerationTask, RegenerateRequest, RegenerateStatus, RenderMode,
+};
 
-/// Startup system: spawn camera, generate initial terrain, spawn background + contours.
+/// Startup system: spawn camera + UI, then kick off async terrain generation.
 pub fn setup(
     mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut contour_entities: ResMut<ContourEntities>,
-    render_mode: Res<RenderMode>,
+    mut gen_task: ResMut<GenerationTask>,
 ) {
     // 2-D camera
     commands.spawn((
@@ -22,95 +19,102 @@ pub fn setup(
         }),
     ));
 
-    // initial terrain
+    // Kick off background generation.
     let seed = rand::random::<u32>();
-    let (data, bg_handle) = generation::generate(seed, &mut images);
-    info!(
-        "seed={}  levels={}  total-segments={}",
-        seed,
-        data.levels.len(),
-        data.levels
-            .iter()
-            .map(|l| l.polylines.iter().map(|p| p.len().saturating_sub(1)).sum::<usize>())
-            .sum::<usize>(),
-    );
-
-    // background heightmap sprite
-    commands.spawn((
-        Sprite {
-            image: bg_handle,
-            custom_size: Some(Vec2::new(WORLD_SIZE, WORLD_SIZE)),
-            ..default()
-        },
-        Transform::from_xyz(0.0, 0.0, -1.0),
-        if render_mode.show_3d {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        },
-        Background,
-    ));
-
-    // spawn contour mesh entities
-    generation::spawn_contour_meshes(&data, &render_mode, &mut commands, &mut materials, &mut meshes, &mut contour_entities);
-    commands.insert_resource(data);
+    let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let cell2 = cell.clone();
+    std::thread::spawn(move || {
+        let result = generation::compute_raw(seed);
+        *cell2.lock().unwrap() = Some(result);
+    });
+    gen_task.cell = Some(cell);
+    info!("generation started (seed={})", seed);
 }
 
-/// Respond to `RegenerateRequest` flag by rebuilding the terrain.
+/// Respond to `RegenerateRequest` flag, cleaning up old assets and
+/// starting a new generation on a background thread.
 pub fn regenerate_on_request(
     mut request: ResMut<RegenerateRequest>,
+    mut commands: Commands,
+    mut contour_entities: ResMut<ContourEntities>,
+    mut gen_task: ResMut<GenerationTask>,
+    bg_query: Query<Entity, With<Background>>,
+) {
+    if !request.0 {
+        return;
+    }
+    request.0 = false;
+
+    // Drop old contour meshes.
+    for &entity in &contour_entities.0 {
+        commands.entity(entity).try_despawn();
+    }
+    contour_entities.0.clear();
+
+    // Drop old background.
+    if let Ok(entity) = bg_query.single() {
+        commands.entity(entity).despawn();
+    }
+
+    // Kick off new generation on a background thread.
+    let new_seed = rand::random::<u32>();
+    let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let cell2 = cell.clone();
+    std::thread::spawn(move || {
+        let result = generation::compute_raw(new_seed);
+        *cell2.lock().unwrap() = Some(result);
+    });
+    gen_task.cell = Some(cell);
+    info!("regeneration started — seed={}", new_seed);
+}
+
+/// Poll the background generation task every frame.
+/// When the result arrives, create Bevy assets on the main thread.
+pub fn poll_generation(
+    mut gen_task: ResMut<GenerationTask>,
     render_mode: Res<RenderMode>,
-    mut data: ResMut<ContourData>,
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut contour_entities: ResMut<ContourEntities>,
-    bg_query: Query<Entity, With<Background>>,
+    mut status: ResMut<RegenerateStatus>,
 ) {
-    if request.0 {
-        request.0 = false;
+    let cell = match gen_task.cell.take() {
+        Some(c) => c,
+        None => return,
+    };
 
-        // drop old meshes
-        for &entity in &contour_entities.0 {
-            commands.entity(entity).try_despawn();
-        }
-        contour_entities.0.clear();
-
-        // drop old background
-        if let Ok(entity) = bg_query.single() {
-            commands.entity(entity).despawn();
-        }
-
-        let new_seed = rand::random::<u32>();
-        let (new_data, bg_handle) = generation::generate(new_seed, &mut images);
-        *data = new_data;
-        info!("regenerated — seed={}", new_seed);
-
-        // re-spawn background
-        commands.spawn((
-            Sprite {
-                image: bg_handle,
-                custom_size: Some(Vec2::new(WORLD_SIZE, WORLD_SIZE)),
-                ..default()
-            },
-            Transform::from_xyz(0.0, 0.0, -1.0),
-            if render_mode.show_3d {
-                Visibility::Visible
-            } else {
-                Visibility::Hidden
-            },
-            Background,
-        ));
-
-        generation::spawn_contour_meshes(
-            &data,
+    let mut guard = cell.lock().unwrap();
+    if let Some(result) = guard.take() {
+        drop(guard);
+        generation::apply_result(
+            result,
             &render_mode,
             &mut commands,
+            &mut images,
             &mut materials,
             &mut meshes,
             &mut contour_entities,
         );
+        status.remaining = 0.0;
+        status.label.clear();
+        // cell dropped → no more polling.
+    } else {
+        // Still computing — put the Arc back.
+        drop(guard);
+        gen_task.cell = Some(cell);
+    }
+}
+
+/// Keep the "Generating..." label alive while a task is pending.
+pub fn maintain_generation_label(
+    gen_task: Res<GenerationTask>,
+    mut status: ResMut<RegenerateStatus>,
+) {
+    if gen_task.cell.is_some() {
+        status.remaining = 0.5;
+        status.label = "Generating...".into();
     }
 }
 

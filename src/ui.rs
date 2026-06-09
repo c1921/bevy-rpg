@@ -109,13 +109,10 @@ pub fn spawn_ui(mut commands: Commands) {
 pub fn regenerate_button(
     mut request: ResMut<RegenerateRequest>,
     mut status: ResMut<RegenerateStatus>,
-    mut q_text: Query<&mut Text, With<StatusText>>,
     q_button: Query<&Interaction, (Changed<Interaction>, With<GenerateButton>)>,
 ) {
     if q_button.iter().any(|i| *i == Interaction::Pressed) {
-        if let Ok(mut text) = q_text.single_mut() {
-            **text = "Generating...".into();
-        }
+        status.label = "Generating...".into();
         status.remaining = 0.5;
         request.0 = true;
     }
@@ -173,7 +170,7 @@ pub fn toggle_render_mode(
     }
 }
 
-/// Tick the countdown; clear the status text when it expires.
+/// Tick the countdown; refresh status text from the resource label.
 pub fn update_status(
     time: Res<Time>,
     mut status: ResMut<RegenerateStatus>,
@@ -181,10 +178,12 @@ pub fn update_status(
 ) {
     if status.remaining > 0.0 {
         status.remaining -= time.delta_secs();
-        if status.remaining <= 0.0 {
-            if let Ok(mut text) = q_text.single_mut() {
-                **text = "".into();
-            }
+    }
+    if let Ok(mut text) = q_text.single_mut() {
+        if status.remaining > 0.0 {
+            **text = status.label.clone();
+        } else {
+            **text = "".into();
         }
     }
 }
