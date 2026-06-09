@@ -1,107 +1,5 @@
-// ── Hydraulic Erosion Simulator ──────────────────────────────────
-// Ported from the Python "simple_map" erosion algorithm.
-// Operates on a discrete 2-D heightmap with periodic boundary
-// conditions; uses rayon for parallelism where possible.
-
 use rayon::prelude::*;
-
-// ── Heightmap ────────────────────────────────────────────────────
-
-/// A 2-D floating‑point grid stored in row‑major order.
-#[derive(Clone)]
-pub struct Heightmap {
-    pub data: Vec<f64>,
-    pub width: usize,
-    pub height: usize,
-}
-
-impl Heightmap {
-    pub fn new(width: usize, height: usize, fill: f64) -> Self {
-        Self {
-            data: vec![fill; width * height],
-            width,
-            height,
-        }
-    }
-
-    #[inline]
-    pub fn get(&self, x: usize, y: usize) -> f64 {
-        self.data[y * self.width + x]
-    }
-
-    #[inline]
-    pub fn set(&mut self, x: usize, y: usize, val: f64) {
-        self.data[y * self.width + x] = val;
-    }
-
-    /// Wrap an integer column index into [0, width).
-    #[inline]
-    fn wrap_x(&self, x: i64) -> usize {
-        let w = self.width as i64;
-        ((x % w + w) % w) as usize
-    }
-
-    /// Wrap an integer row index into [0, height).
-    #[inline]
-    fn wrap_y(&self, y: i64) -> usize {
-        let h = self.height as i64;
-        ((y % h + h) % h) as usize
-    }
-
-    /// Bilinear sample at a sub-pixel coordinate `(px, py)` with
-    /// periodic boundary wrapping.
-    pub fn sample_bilinear(&self, px: f64, py: f64) -> f64 {
-        let x0f = px.floor();
-        let y0f = py.floor();
-        let x0 = x0f as i64;
-        let y0 = y0f as i64;
-        let x1 = x0 + 1;
-        let y1 = y0 + 1;
-
-        let tx = px - x0f;
-        let ty = py - y0f;
-
-        let x0w = self.wrap_x(x0);
-        let x1w = self.wrap_x(x1);
-        let y0w = self.wrap_y(y0);
-        let y1w = self.wrap_y(y1);
-
-        let a00 = self.get(x0w, y0w);
-        let a01 = self.get(x1w, y0w);
-        let a10 = self.get(x0w, y1w);
-        let a11 = self.get(x1w, y1w);
-
-        (1.0 - ty) * ((1.0 - tx) * a00 + tx * a01)
-            + ty * ((1.0 - tx) * a10 + tx * a11)
-    }
-}
-
-// ── Gradient ─────────────────────────────────────────────────────
-
-/// Gradient of a heightmap: `real` = dy (axis‑1 / column difference),
-/// `imag` = dx (axis‑0 / row difference).  Matches the Python complex
-/// encoding `1j * dx + dy`.
-#[derive(Clone)]
-pub struct Gradient {
-    pub real: Vec<f64>,
-    pub imag: Vec<f64>,
-    #[allow(dead_code)]
-    pub width: usize,
-    #[allow(dead_code)]
-    pub height: usize,
-}
-
-impl Gradient {
-    pub fn new(width: usize, height: usize) -> Self {
-        let n = width * height;
-        Self {
-            real: vec![0.0; n],
-            imag: vec![0.0; n],
-            width,
-            height,
-        }
-    }
-}
+use crate::erosion::heightmap::{Gradient, Heightmap};
 
 // ── Utility functions ────────────────────────────────────────────
 
@@ -118,7 +16,6 @@ pub fn simple_gradient(hm: &Heightmap) -> Gradient {
     let mut imag = Vec::with_capacity(n);
 
     // Collect into Vec by iterating rows in parallel.
-    // Each row produces (real_row, imag_row); we interleave them.
     let pairs: Vec<(Vec<f64>, Vec<f64>)> = (0..h)
         .into_par_iter()
         .map(|y| {
@@ -178,7 +75,6 @@ pub fn sample(hm: &Heightmap, off_real: &[f64], off_imag: &[f64]) -> Heightmap {
 pub fn displace(source: &Heightmap, grad_real: &[f64], grad_imag: &[f64]) -> Heightmap {
     let w = source.width;
     let h = source.height;
-    let _n = w * h;
     let mut out = Heightmap::new(w, h, 0.0);
 
     out.data
@@ -229,7 +125,7 @@ pub fn displace(source: &Heightmap, grad_real: &[f64], grad_imag: &[f64]) -> Hei
 }
 
 /// Precompute a 1‑D Gaussian kernel with periodic wrap.
-fn gaussian_kernel_1d(sigma: f64, radius: usize) -> Vec<f64> {
+pub fn gaussian_kernel_1d(sigma: f64, radius: usize) -> Vec<f64> {
     let two_s2 = 2.0 * sigma * sigma;
     let denom = 1.0 / (sigma * (2.0 * std::f64::consts::PI).sqrt());
     let mut k: Vec<f64> = (0..=2 * radius)
@@ -338,7 +234,6 @@ impl ErosionSimulator {
     /// Run the full hydraulic erosion loop on `terrain`, modifying it
     /// in‑place.
     pub fn simulate(&self, terrain: &mut Heightmap) {
-
         let cfg = &self.config;
         let cell_area = cfg.cell_width * cfg.cell_width;
         let w = terrain.width;
@@ -378,7 +273,6 @@ impl ErosionSimulator {
                 });
 
             // ── 3. Height delta — sample downhill (-gradient) ─
-            // neighbour_height = sample(terrain, -gradient)
             let mut off_real = grad.real.clone();
             let mut off_imag = grad.imag.clone();
             off_real.par_iter_mut().for_each(|v| *v = -*v);
@@ -483,8 +377,6 @@ fn apply_slippage(
     cfg: &ErosionConfig,
 ) {
     // Compute slope magnitude: |grad| / cell_width
-    // grad is already unit, so we need the original magnitude.
-    // Re‑compute simple_gradient to get the raw (non‑unit) gradient.
     let raw = simple_gradient(terrain);
 
     let w = terrain.width;

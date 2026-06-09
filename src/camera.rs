@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::terrain::WORLD_HALF;
+use crate::config::WORLD_HALF;
 
 /// Resource tracking camera drag state.
 #[derive(Resource, Default)]

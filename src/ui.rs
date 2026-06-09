@@ -1,18 +1,6 @@
 use bevy::prelude::*;
 
-use crate::{RegenerateRequest, RenderMode};
-
-/// Resource controlling how long the status text stays visible (seconds).
-#[derive(Resource)]
-pub struct RegenerateStatus {
-    remaining: f32,
-}
-
-impl Default for RegenerateStatus {
-    fn default() -> Self {
-        Self { remaining: 0.0 }
-    }
-}
+use crate::resources::{RegenerateRequest, RegenerateStatus, RenderMode};
 
 /// Marker component for the status text entity.
 #[derive(Component)]
