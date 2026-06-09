@@ -13,7 +13,7 @@ use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 use camera::{camera_control, CameraDrag};
 use contour::{marching_squares_from_heights, ContourLevel};
 use terrain::{Terrain, WORLD_HALF};
-use ui::{regenerate_button, spawn_ui, update_status, RegenerateStatus};
+use ui::{regenerate_button, spawn_ui, toggle_render_mode, update_status, RegenerateStatus};
 
 // ── world constants ──────────────────────────────────────────────
 const GRID_COLS: usize = 400;
@@ -36,6 +36,22 @@ struct ContourEntities(Vec<Entity>);
 #[derive(Resource, Default)]
 pub struct RegenerateRequest(pub bool);
 
+/// Resource controlling which render layers are visible.
+#[derive(Resource)]
+pub struct RenderMode {
+    pub show_3d: bool,
+    pub show_contours: bool,
+}
+
+impl Default for RenderMode {
+    fn default() -> Self {
+        Self {
+            show_3d: true,
+            show_contours: true,
+        }
+    }
+}
+
 /// Marker for the background heightmap sprite.
 #[derive(Component)]
 struct Background;
@@ -54,8 +70,9 @@ fn main() {
         .init_resource::<ContourEntities>()
         .init_resource::<RegenerateStatus>()
         .init_resource::<RegenerateRequest>()
+        .init_resource::<RenderMode>()
         .add_systems(Startup, (setup, spawn_ui))
-        .add_systems(Update, (camera_control, regenerate_on_request, regenerate_button, update_status))
+        .add_systems(Update, (camera_control, regenerate_on_request, regenerate_button, toggle_render_mode, update_status, sync_background_visibility, sync_contour_visibility))
         .run();
 }
 
@@ -67,6 +84,7 @@ fn setup(
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut contour_entities: ResMut<ContourEntities>,
+    render_mode: Res<RenderMode>,
 ) {
     // 2-D camera
     commands.spawn((
@@ -98,11 +116,16 @@ fn setup(
             ..default()
         },
         Transform::from_xyz(0.0, 0.0, -1.0),
+        if render_mode.show_3d {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        },
         Background,
     ));
 
     // spawn contour mesh entities
-    spawn_contour_meshes(&data, &mut commands, &mut materials, &mut meshes, &mut contour_entities);
+    spawn_contour_meshes(&data, &render_mode, &mut commands, &mut materials, &mut meshes, &mut contour_entities);
     commands.insert_resource(data);
 }
 
@@ -111,6 +134,7 @@ fn setup(
 /// Respond to `RegenerateRequest` flag by rebuilding the terrain.
 fn regenerate_on_request(
     mut request: ResMut<RegenerateRequest>,
+    render_mode: Res<RenderMode>,
     mut data: ResMut<ContourData>,
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -146,16 +170,57 @@ fn regenerate_on_request(
                 ..default()
             },
             Transform::from_xyz(0.0, 0.0, -1.0),
+            if render_mode.show_3d {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            },
             Background,
         ));
 
         spawn_contour_meshes(
             &data,
+            &render_mode,
             &mut commands,
             &mut materials,
             &mut meshes,
             &mut contour_entities,
         );
+    }
+}
+
+/// Sync the background sprite visibility with `RenderMode::show_3d`.
+fn sync_background_visibility(
+    render_mode: Res<RenderMode>,
+    mut bg_query: Query<&mut Visibility, With<Background>>,
+) {
+    if render_mode.is_changed() {
+        if let Ok(mut vis) = bg_query.single_mut() {
+            *vis = if render_mode.show_3d {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        }
+    }
+}
+
+/// Sync contour mesh visibility with `RenderMode::show_contours`.
+fn sync_contour_visibility(
+    render_mode: Res<RenderMode>,
+    contour_entities: Res<ContourEntities>,
+    mut vis_query: Query<&mut Visibility>,
+) {
+    if render_mode.is_changed() {
+        for &entity in &contour_entities.0 {
+            if let Ok(mut vis) = vis_query.get_mut(entity) {
+                *vis = if render_mode.show_contours {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                };
+            }
+        }
     }
 }
 
@@ -254,17 +319,23 @@ fn generate(seed: u32, images: &mut Assets<Image>) -> (ContourData, Handle<Image
 
 fn spawn_contour_meshes(
     data: &ContourData,
+    render_mode: &RenderMode,
     commands: &mut Commands,
     materials: &mut ResMut<Assets<ColorMaterial>>,
     meshes: &mut ResMut<Assets<Mesh>>,
     contour_entities: &mut ResMut<ContourEntities>,
 ) {
+    let vis = if render_mode.show_contours {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
     for level in &data.levels {
         let color = elevation_color(level.elevation);
         let mesh = build_contour_line_mesh(level, LINE_WIDTH);
         let material = materials.add(ColorMaterial::from_color(color));
         let entity = commands
-            .spawn((Mesh2d(meshes.add(mesh)), MeshMaterial2d(material)))
+            .spawn((Mesh2d(meshes.add(mesh)), MeshMaterial2d(material), vis))
             .id();
         contour_entities.0.push(entity);
     }
