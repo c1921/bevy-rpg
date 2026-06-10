@@ -232,17 +232,17 @@ pub struct ErosionConfig {
 impl Default for ErosionConfig {
     fn default() -> Self {
         Self {
-            iterations: 200,
+            iterations: 150,
             rain_rate: 0.0015,
             evaporation_rate: 0.0005,
             min_height_delta: 0.05,
-            repose_slope: 0.03,
-            gravity: 50.0,
-            sediment_capacity_constant: 80.0,
-            dissolving_rate: 0.4,
-            deposition_rate: 0.0005,
+            repose_slope: 0.10,
+            gravity: 25.0,
+            sediment_capacity_constant: 50.0,
+            dissolving_rate: 0.2,
+            deposition_rate: 0.001,
             cell_width: 1.0,
-            slippage_interval: 3,
+            slippage_interval: 6,
         }
     }
 }
