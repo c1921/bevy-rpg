@@ -106,8 +106,6 @@ pub fn spawn_ui(mut commands: Commands) {
                 .with_children(|row| {
                     for (kind, label) in [
                         (ViewKind::Final, "Final"),
-                        (ViewKind::CompressedNorm, "Compressed N"),
-                        (ViewKind::ProcessedNoise, "Compressed"),
                         (ViewKind::InitialNoise, "Raw Noise"),
                     ] {
                         row.spawn((

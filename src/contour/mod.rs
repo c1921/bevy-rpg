@@ -3,7 +3,6 @@ pub mod marching;
 
 use chaining::chain_segments;
 use marching::{extract_segments, extract_segments_flat};
-use crate::terrain::Terrain;
 
 /// One contour level: all polylines at the same elevation.
 pub struct ContourLevel {
@@ -13,40 +12,6 @@ pub struct ContourLevel {
 
 /// Extract contour polylines from the terrain height field.
 ///
-/// * `grid_cols`, `grid_rows` – number of *cells* (samples = cols+1 × rows+1).
-/// * `world_*` – axis-aligned rectangle in world space (metres).
-/// * `interval` – vertical spacing between contour levels (metres).
-#[allow(dead_code)]
-pub fn marching_squares(
-    terrain: &Terrain,
-    world_x_min: f64,
-    world_y_min: f64,
-    world_x_max: f64,
-    world_y_max: f64,
-    grid_cols: usize,
-    grid_rows: usize,
-    interval: f64,
-) -> Vec<ContourLevel> {
-    let dx = (world_x_max - world_x_min) / grid_cols as f64;
-    let dy = (world_y_max - world_y_min) / grid_rows as f64;
-
-    // ── sample heights ──────────────────────────────────────────
-    let rows = grid_rows + 1;
-    let cols = grid_cols + 1;
-    let mut heights: Vec<Vec<f64>> = Vec::with_capacity(rows);
-    for r in 0..rows {
-        let wy = world_y_min + r as f64 * dy;
-        let mut row = Vec::with_capacity(cols);
-        for c in 0..cols {
-            let wx = world_x_min + c as f64 * dx;
-            row.push(terrain.height(wx, wy));
-        }
-        heights.push(row);
-    }
-
-    marching_squares_from_heights(&heights, world_x_min, world_y_min, dx, dy, interval)
-}
-
 /// Extract contour polylines from a pre‑sampled 2-D height grid.
 ///
 /// `heights[r][c]` is the elevation at row `r`, column `c`.

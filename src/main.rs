@@ -3,10 +3,10 @@ mod config;
 mod contour;
 mod erosion;
 mod generation;
+mod noise;
 mod render;
 mod resources;
 mod systems;
-mod terrain;
 mod ui;
 
 use bevy::prelude::*;

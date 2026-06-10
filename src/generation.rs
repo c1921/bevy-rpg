@@ -7,7 +7,6 @@ use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 use crate::config::{CONTOUR_INTERVAL, GRID_COLS, GRID_ROWS, LINE_WIDTH, MAX_HEIGHT, WORLD_HALF, WORLD_SIZE};
 use crate::contour::{marching_squares_from_flat, ContourLevel};
 use crate::resources::{Background, ContourData, ContourEntities, GenerationResult, IntermediateView, RenderMode, ViewKind, ViewSprites};
-use crate::terrain::Terrain;
 
 /// Pure computation: noise → erosion → render pixels → contour extraction.
 ///
@@ -15,27 +14,18 @@ use crate::terrain::Terrain;
 pub fn compute_raw(seed: u32) -> GenerationResult {
     let t_total = std::time::Instant::now();
 
-    let terrain = Terrain::new(seed);
-
     let dx = (WORLD_HALF - (-WORLD_HALF)) / GRID_COLS as f64;
     let dy = (WORLD_HALF - (-WORLD_HALF)) / GRID_ROWS as f64;
     let rows = GRID_ROWS + 1;
     let cols = GRID_COLS + 1;
 
-    // Sample the continuous terrain into a discrete heightmap.
+    // Generate FFT power-law noise directly into the heightmap.
     let t_noise = std::time::Instant::now();
     let mut hm = crate::erosion::Heightmap::new(cols, rows, 0.0);
-    use rayon::prelude::*;
-    hm.data.par_iter_mut().enumerate().for_each(|(idx, v)| {
-        let r = idx / cols;
-        let c = idx % cols;
-        let wx = -WORLD_HALF + c as f64 * dx;
-        let wy = -WORLD_HALF + r as f64 * dy;
-        *v = terrain.height(wx, wy);
-    });
+    hm.data = crate::noise::fbm_fft(rows, cols, -2.0, seed as u64);
     let noise_ms = t_noise.elapsed().as_millis();
 
-    // Normalize to [0, 1] — erosion parameters are tuned for this range.
+    // FFT noise is already normalized to [0, 1], but re-normalize for safety.
     let h_min = hm.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
     let h_max = hm.data.iter().copied().reduce(f64::max).unwrap_or(1.0);
     let h_range = if (h_max - h_min) < 1e-12 {
@@ -44,38 +34,11 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
         h_max - h_min
     };
 
-    // Capture initial noise (simple [0,1] normalised, before underwater compression).
+    // Capture initial noise ([0,1] normalised, before erosion).
     let initial_noise_hm: Vec<f32> = hm
         .data
         .iter()
         .map(|&v| ((v - h_min) / h_range).clamp(0.0, 1.0) as f32)
-        .collect();
-
-    // Normalize to [0,1] then remap [0, 0.45] → [0.4, 0.45] to compress
-    // underwater relief before erosion, so erosion works on the remapped data.
-    hm.data.iter_mut().for_each(|v| {
-        let n = (*v - h_min) / h_range;
-        *v = if n <= 0.45 {
-            0.4 + n * (0.05 / 0.45)
-        } else {
-            n
-        };
-    });
-
-    // Capture processed-noise heightmap (post-compression, pre-erosion).
-    let processed_noise_hm: Vec<f32> = hm
-        .data
-        .iter()
-        .map(|&v| v.clamp(0.0, 1.0) as f32)
-        .collect();
-
-    // Re-normalize processed noise to strict [0,1] (matching Final's scale).
-    let pn_min = processed_noise_hm.iter().copied().reduce(f32::min).unwrap_or(0.0);
-    let pn_max = processed_noise_hm.iter().copied().reduce(f32::max).unwrap_or(1.0);
-    let pn_range = if (pn_max - pn_min) < 1e-12 { 1.0 } else { pn_max - pn_min };
-    let compressed_norm_hm: Vec<f32> = processed_noise_hm
-        .iter()
-        .map(|&v| ((v - pn_min) / pn_range).clamp(0.0, 1.0))
         .collect();
 
     // Hydraulic erosion.
@@ -147,8 +110,6 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
         bg_rows: rows,
         data: ContourData { levels },
         initial_noise_hm,
-        processed_noise_hm,
-        compressed_norm_hm,
     }
 }
 
@@ -268,11 +229,7 @@ pub fn apply_result(
     };
 
     let ent_init = make_view(&result.initial_noise_hm, ViewKind::InitialNoise, commands, images);
-    let ent_proc = make_view(&result.processed_noise_hm, ViewKind::ProcessedNoise, commands, images);
-    let ent_cnorm = make_view(&result.compressed_norm_hm, ViewKind::CompressedNorm, commands, images);
     view_sprites.entities.insert(ViewKind::InitialNoise, ent_init);
-    view_sprites.entities.insert(ViewKind::ProcessedNoise, ent_proc);
-    view_sprites.entities.insert(ViewKind::CompressedNorm, ent_cnorm);
 
     bg_handle
 }
