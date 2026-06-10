@@ -8,13 +8,12 @@ pub struct Terrain {
 
 impl Terrain {
     /// Create a new terrain with the given seed.
-    /// Wavelengths: base ~10 km, 6 octaves → finest ~312 m.
     pub fn new(seed: u32) -> Self {
         let fbm = Fbm::<Perlin>::new(seed)
             .set_octaves(6)
             .set_lacunarity(2.0)
             .set_persistence(0.5)
-            .set_frequency(0.0001); // 1 / 10 000 m
+            .set_frequency(0.00003);
 
         Terrain { fbm }
     }
