@@ -1,10 +1,10 @@
 // ── World / rendering constants ──────────────────────────────────
 
 /// Width of the sampled heightmap, in cells.
-pub const GRID_COLS: usize = 511;
+pub const GRID_COLS: usize = 1023;
 
 /// Height of the sampled heightmap, in cells.
-pub const GRID_ROWS: usize = 511;
+pub const GRID_ROWS: usize = 1023;
 
 /// Vertical spacing between contour levels (metres).
 pub const CONTOUR_INTERVAL: f64 = 200.0;
