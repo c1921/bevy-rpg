@@ -50,6 +50,39 @@ impl Default for RegenerateStatus {
 #[derive(Component)]
 pub struct Background;
 
+/// Marker component for intermediate-view sprites (initial noise, post-erosion, etc.).
+#[derive(Component, Clone, Copy)]
+pub struct IntermediateView {
+    pub kind: ViewKind,
+}
+
+/// Which intermediate / final view is currently shown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ViewKind {
+    Final,
+    CompressedNorm,
+    ProcessedNoise,
+    InitialNoise,
+}
+
+/// Resource — which intermediate/final view is active.
+#[derive(Resource)]
+pub struct ViewMode {
+    pub kind: ViewKind,
+}
+
+impl Default for ViewMode {
+    fn default() -> Self {
+        Self { kind: ViewKind::Final }
+    }
+}
+
+/// Entities of the intermediate-view sprites, keyed by ViewKind.
+#[derive(Resource, Default)]
+pub struct ViewSprites {
+    pub entities: std::collections::HashMap<ViewKind, Entity>,
+}
+
 // ── Async generation ───────────────────────────────────────────────
 
 /// Fully‑computed generation data, ready for asset creation on the main thread.
@@ -61,6 +94,12 @@ pub struct GenerationResult {
     pub bg_cols: usize,
     pub bg_rows: usize,
     pub data: ContourData,
+    /// Initial noise heightmap, normalized to [0, 1] (f32).
+    pub initial_noise_hm: Vec<f32>,
+    /// Heightmap after underwater compression, before erosion (f32).
+    pub processed_noise_hm: Vec<f32>,
+    /// processed_noise_hm re-normalized to strict [0,1] (same scale as Final).
+    pub compressed_norm_hm: Vec<f32>,
 }
 
 /// State for background terrain generation.

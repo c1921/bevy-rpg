@@ -6,7 +6,7 @@ use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 
 use crate::config::{CONTOUR_INTERVAL, GRID_COLS, GRID_ROWS, LINE_WIDTH, MAX_HEIGHT, WORLD_HALF, WORLD_SIZE};
 use crate::contour::{marching_squares_from_flat, ContourLevel};
-use crate::resources::{Background, ContourData, ContourEntities, GenerationResult, RenderMode};
+use crate::resources::{Background, ContourData, ContourEntities, GenerationResult, IntermediateView, RenderMode, ViewKind, ViewSprites};
 use crate::terrain::Terrain;
 
 /// Pure computation: noise → erosion → render pixels → contour extraction.
@@ -43,6 +43,14 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
     } else {
         h_max - h_min
     };
+
+    // Capture initial noise (simple [0,1] normalised, before underwater compression).
+    let initial_noise_hm: Vec<f32> = hm
+        .data
+        .iter()
+        .map(|&v| ((v - h_min) / h_range).clamp(0.0, 1.0) as f32)
+        .collect();
+
     // Normalize to [0,1] then remap [0, 0.45] → [0.4, 0.45] to compress
     // underwater relief before erosion, so erosion works on the remapped data.
     hm.data.iter_mut().for_each(|v| {
@@ -53,6 +61,22 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
             n
         };
     });
+
+    // Capture processed-noise heightmap (post-compression, pre-erosion).
+    let processed_noise_hm: Vec<f32> = hm
+        .data
+        .iter()
+        .map(|&v| v.clamp(0.0, 1.0) as f32)
+        .collect();
+
+    // Re-normalize processed noise to strict [0,1] (matching Final's scale).
+    let pn_min = processed_noise_hm.iter().copied().reduce(f32::min).unwrap_or(0.0);
+    let pn_max = processed_noise_hm.iter().copied().reduce(f32::max).unwrap_or(1.0);
+    let pn_range = if (pn_max - pn_min) < 1e-12 { 1.0 } else { pn_max - pn_min };
+    let compressed_norm_hm: Vec<f32> = processed_noise_hm
+        .iter()
+        .map(|&v| ((v - pn_min) / pn_range).clamp(0.0, 1.0))
+        .collect();
 
     // Hydraulic erosion.
     let t_erosion = std::time::Instant::now();
@@ -122,6 +146,9 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
         bg_cols: cols,
         bg_rows: rows,
         data: ContourData { levels },
+        initial_noise_hm,
+        processed_noise_hm,
+        compressed_norm_hm,
     }
 }
 
@@ -136,6 +163,7 @@ pub fn apply_result(
     materials: &mut ResMut<Assets<ColorMaterial>>,
     meshes: &mut ResMut<Assets<Mesh>>,
     contour_entities: &mut ResMut<ContourEntities>,
+    view_sprites: &mut ResMut<ViewSprites>,
 ) -> Handle<Image> {
     info!(
         "apply_result seed={}  levels={}  total-segments={}",
@@ -190,6 +218,61 @@ pub fn apply_result(
 
     // Store contour data as a resource for later access.
     commands.insert_resource(result.data);
+
+    // ── Intermediate view sprites ──────────────────────────────────
+    // Clear old intermediate-view sprites.
+    for &entity in view_sprites.entities.values() {
+        commands.entity(entity).try_despawn();
+    }
+    view_sprites.entities.clear();
+
+    // Helper: create a sprite from a [0,1] f32 heightmap.
+    let make_view = |hm: &[f32], kind: ViewKind,
+                     commands: &mut Commands,
+                     images: &mut ResMut<Assets<Image>>|
+     -> Entity {
+        let pixels = crate::render::render_heightmap(
+            hm,
+            result.bg_cols,
+            result.bg_rows,
+            -0.2,              // sea_level
+            0.9,               // snow_level
+            [-0.2, -0.5, 0.7], // light_dir
+            0.35,              // ambient
+            6.0,               // normal_strength
+        );
+        let image = Image::new(
+            Extent3d {
+                width: result.bg_cols as u32,
+                height: result.bg_rows as u32,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            pixels,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        );
+        let handle = images.add(image);
+        commands
+            .spawn((
+                Sprite {
+                    image: handle,
+                    custom_size: Some(Vec2::new(WORLD_SIZE, WORLD_SIZE)),
+                    ..default()
+                },
+                Transform::from_xyz(0.0, 0.0, -1.0),
+                Visibility::Hidden,
+                IntermediateView { kind },
+            ))
+            .id()
+    };
+
+    let ent_init = make_view(&result.initial_noise_hm, ViewKind::InitialNoise, commands, images);
+    let ent_proc = make_view(&result.processed_noise_hm, ViewKind::ProcessedNoise, commands, images);
+    let ent_cnorm = make_view(&result.compressed_norm_hm, ViewKind::CompressedNorm, commands, images);
+    view_sprites.entities.insert(ViewKind::InitialNoise, ent_init);
+    view_sprites.entities.insert(ViewKind::ProcessedNoise, ent_proc);
+    view_sprites.entities.insert(ViewKind::CompressedNorm, ent_cnorm);
 
     bg_handle
 }
