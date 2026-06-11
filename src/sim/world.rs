@@ -2,9 +2,10 @@
 
 use super::cell::*;
 use super::water::Drop;
-use bevy::math::{Vec2, IVec2};
+use bevy::math::Vec2;
 use rand::Rng;
 use rand::SeedableRng;
+use rayon::prelude::*;
 
 pub struct World {
     pub map: WorldMap,
@@ -13,12 +14,9 @@ pub struct World {
 }
 
 impl World {
-    // Parameters (matching original World statics)
     pub const LRATE: f32 = 0.1;
     #[allow(dead_code)]
     pub const DISCHARGE_THRESH: f32 = 0.3;
-    pub const MAXDIFF: f32 = 0.01;
-    pub const SETTLING: f32 = 0.8;
 
     pub fn new(seed: u32) -> Self {
         let mut world = Self {
@@ -42,9 +40,8 @@ impl World {
         noise.set_noise_type(Some(NoiseType::OpenSimplex2));
         noise.set_fractal_type(Some(FractalType::FBm));
 
-        for cell in self.map.cells.iter_mut() {
-            cell.height = 0.0;
-        }
+        // Reset heights
+        self.map.cells.par_iter_mut().for_each(|c| c.height = 0.0);
 
         let mut frequency = 1.0f32;
         let mut scale = 0.6f32;
@@ -52,28 +49,31 @@ impl World {
         for _octave in 0..8 {
             noise.set_frequency(Some(frequency));
 
-            for y in 0..WORLD_SIZE {
-                for x in 0..WORLD_SIZE {
-                    let px = x as f32 / TILE_SIZE as f32;
+            // Parallel XY noise sampling within each octave
+            self.map.cells.par_chunks_mut(WORLD_SIZE)
+                .enumerate()
+                .for_each(|(y, row)| {
                     let py = y as f32 / TILE_SIZE as f32;
-                    let h = noise.get_noise_2d(px, py);
-                    if let Some(cell) = self.map.get_mut(x as i32, y as i32) {
+                    for (x, cell) in row.iter_mut().enumerate() {
+                        let px = x as f32 / TILE_SIZE as f32;
+                        let h = noise.get_noise_2d(px, py);
                         cell.height += scale * h;
                     }
-                }
-            }
+                });
 
             frequency *= 2.0;
             scale *= 0.6;
         }
 
-        // --- Find min/max for normalization ---
-        let mut min = f32::MAX;
-        let mut max = f32::MIN;
-        for cell in self.map.cells.iter() {
-            min = min.min(cell.height);
-            max = max.max(cell.height);
-        }
+        // --- Find min/max for normalization (parallel reduce) ---
+        let (min, max) = self.map.cells.par_iter()
+            .map(|c| (c.height, c.height))
+            .reduce(
+                || (f32::MAX, f32::MIN),
+                |(min_a, max_a), (min_b, max_b)| {
+                    (min_a.min(min_b), max_a.max(max_b))
+                },
+            );
 
         // --- Layer 2: Normalization noise pass ---
         let mut noise2 = FastNoiseLite::with_seed(self.seed as i32);
@@ -84,151 +84,113 @@ impl World {
         noise2.set_fractal_gain(Some(0.6));
         noise2.set_frequency(Some(1.0));
 
-        for y in 0..WORLD_SIZE {
-            for x in 0..WORLD_SIZE {
-                let px = x as f32 / TILE_SIZE as f32;
+        let range = max - min;
+        self.map.cells.par_chunks_mut(WORLD_SIZE)
+            .enumerate()
+            .for_each(|(y, row)| {
                 let py = y as f32 / TILE_SIZE as f32;
-                let scale_val = noise2.get_noise_2d(px, py);
-                let d = 0.1 + 0.5 * (1.0 + erf_approx(2.0 * scale_val));
-                if let Some(cell) = self.map.get_mut(x as i32, y as i32) {
-                    cell.height = d * ((cell.height - min) / (max - min));
+                for (x, cell) in row.iter_mut().enumerate() {
+                    let px = x as f32 / TILE_SIZE as f32;
+                    let scale_val = noise2.get_noise_2d(px, py);
+                    let d = 0.1 + 0.5 * (1.0 + erf_approx(2.0 * scale_val));
+                    cell.height = d * ((cell.height - min) / range);
                 }
-            }
-        }
+            });
 
         println!("... height generation complete");
     }
 
-    /// Run `cycles` erosion iterations over the whole map
+    /// Run `cycles` erosion iterations over the whole map (parallel).
+    /// Uses thread-local delta buffers: each thread processes its own droplet batch
+    /// on independent delta arrays, then results are merged back.
     pub fn erode(&mut self, cycles: usize) {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(
-            self.seed as u64 ^ (self.frame.wrapping_mul(0x9E3779B97F4A7C15)),
-        );
+        let num_threads = rayon::current_num_threads().min(cycles.max(1));
+        let per_thread = cycles / num_threads;
 
-        // Reset track fields
-        for cell in self.map.cells.iter_mut() {
-            cell.discharge_track = 0.0;
-            cell.momentum_x_track = 0.0;
-            cell.momentum_y_track = 0.0;
-        }
+        let base_seed = self.seed as u64 ^ (self.frame.wrapping_mul(0x9E3779B97F4A7C15));
 
-        // Spawn and run particles
-        for _ in 0..cycles {
-            let rx = rng.gen_range(0..TILE_SIZE as i32);
-            let ry = rng.gen_range(0..TILE_SIZE as i32);
-            let newpos = Vec2::new(rx as f32, ry as f32);
+        // === Phase 1: Parallel droplet execution with thread-local deltas ===
+        let thread_results: Vec<_> = (0..num_threads).into_par_iter().map(|t| {
+            // Thread-local delta arrays
+            let mut height_delta = vec![0.0f32; WORLD_AREA];
+            let mut discharge_track = vec![0.0f32; WORLD_AREA];
+            let mut momentum_x_track = vec![0.0f32; WORLD_AREA];
+            let mut momentum_y_track = vec![0.0f32; WORLD_AREA];
 
-            // Skip if too low (below water level ~0.1)
-            if self.map.height_f(newpos) < 0.1 {
-                continue;
+            let thread_seed = base_seed ^ ((t as u64).wrapping_mul(0xDEADBEEF));
+            let mut rng = rand::rngs::StdRng::seed_from_u64(thread_seed);
+
+            let n = if t == num_threads - 1 {
+                cycles - per_thread * (num_threads - 1)
+            } else {
+                per_thread
+            };
+
+            for _ in 0..n {
+                let rx = rng.gen_range(0..TILE_SIZE as i32);
+                let ry = rng.gen_range(0..TILE_SIZE as i32);
+                let newpos = Vec2::new(rx as f32, ry as f32);
+
+                // Check spawn height against base + delta
+                if self.map.height_f_delta(&height_delta, newpos) < 0.1 {
+                    continue;
+                }
+
+                let mut drop = Drop::new(newpos);
+                while drop.descend_delta(
+                    &self.map,
+                    &mut height_delta,
+                    &mut discharge_track,
+                    &mut momentum_x_track,
+                    &mut momentum_y_track,
+                ) {
+                    // Cascade after each step (within thread-local delta)
+                    self.map.cascade_delta(&mut height_delta, drop.pos);
+                }
             }
 
-            let mut drop = Drop::new(newpos);
-            while drop.descend(self) {}
-        }
+            (height_delta, discharge_track, momentum_x_track, momentum_y_track)
+        }).collect();
 
-        // Leak track values into display fields
-        for cell in self.map.cells.iter_mut() {
-            cell.discharge =
-                (1.0 - Self::LRATE) * cell.discharge + Self::LRATE * cell.discharge_track;
-            cell.momentum_x =
-                (1.0 - Self::LRATE) * cell.momentum_x + Self::LRATE * cell.momentum_x_track;
-            cell.momentum_y =
-                (1.0 - Self::LRATE) * cell.momentum_y + Self::LRATE * cell.momentum_y_track;
-        }
+        // === Phase 2: Reset main track fields (parallel) ===
+        self.map.cells.par_iter_mut().for_each(|c| {
+            c.discharge_track = 0.0;
+            c.momentum_x_track = 0.0;
+            c.momentum_y_track = 0.0;
+        });
+
+        // === Phase 3: Merge thread results into main grid ===
+        // Height: average deltas across threads, track: sum deltas across threads
+        let nf = num_threads as f32;
+        self.map.cells.par_iter_mut().enumerate().for_each(|(i, cell)| {
+            let mut h_sum = 0.0f32;
+            let mut dt_sum = 0.0f32;
+            let mut mxt_sum = 0.0f32;
+            let mut myt_sum = 0.0f32;
+            for result in &thread_results {
+                h_sum += result.0[i];
+                dt_sum += result.1[i];
+                mxt_sum += result.2[i];
+                myt_sum += result.3[i];
+            }
+            cell.height += h_sum / nf;
+            cell.discharge_track = dt_sum;
+            cell.momentum_x_track = mxt_sum;
+            cell.momentum_y_track = myt_sum;
+        });
+
+        // === Phase 4: Leak track values into display fields (parallel) ===
+        self.map.cells.par_iter_mut().for_each(|c| {
+            c.discharge = (1.0 - Self::LRATE) * c.discharge + Self::LRATE * c.discharge_track;
+            c.momentum_x = (1.0 - Self::LRATE) * c.momentum_x + Self::LRATE * c.momentum_x_track;
+            c.momentum_y = (1.0 - Self::LRATE) * c.momentum_y + Self::LRATE * c.momentum_y_track;
+        });
 
         self.frame += 1;
     }
-
-    /// Cascade settling: propagate excess height to lower neighbors
-    pub fn cascade(&mut self, pos: Vec2) {
-        let ipos = IVec2::new(pos.x.floor() as i32, pos.y.floor() as i32);
-
-        let neighbors: [(i32, i32); 8] = [
-            (-1, -1),
-            (-1, 0),
-            (-1, 1),
-            (0, -1),
-            (0, 1),
-            (1, -1),
-            (1, 0),
-            (1, 1),
-        ];
-
-        struct Point {
-            pos: IVec2,
-            h: f32,
-            d: f32,
-        }
-
-        let mut sn: [Option<Point>; 8] = [
-            None, None, None, None, None, None, None, None,
-        ];
-        let mut num = 0;
-
-        for (dx, dy) in &neighbors {
-            let npos = IVec2::new(ipos.x + LOD_SIZE * dx, ipos.y + LOD_SIZE * dy);
-
-            if self.map.oob_i(npos.x, npos.y) {
-                continue;
-            }
-
-            let d = Vec2::new(*dx as f32, *dy as f32).length();
-
-            if let Some(cell) = self.map.get(npos.x, npos.y) {
-                sn[num] = Some(Point {
-                    pos: npos,
-                    h: cell.height,
-                    d,
-                });
-                num += 1;
-            }
-        }
-
-        // Sort by height ascending
-        let mut points: Vec<&Point> = sn[..num].iter().filter_map(|p| p.as_ref()).collect();
-        points.sort_by(|a, b| a.h.partial_cmp(&b.h).unwrap());
-
-        let cur_h = self.map.height_i(ipos.x, ipos.y);
-
-        for pt in &points {
-            let diff = cur_h - pt.h;
-            if diff == 0.0 {
-                continue;
-            }
-
-            let excess = if pt.h > 0.1 {
-                diff.abs() - pt.d * Self::MAXDIFF * LOD_SIZE_F
-            } else {
-                diff.abs()
-            };
-
-            if excess <= 0.0 {
-                continue;
-            }
-
-            let transfer = Self::SETTLING * excess / 2.0;
-
-            if diff > 0.0 {
-                if let Some(cell) = self.map.get_mut(ipos.x, ipos.y) {
-                    cell.height -= transfer;
-                }
-                if let Some(cell) = self.map.get_mut(pt.pos.x, pt.pos.y) {
-                    cell.height += transfer;
-                }
-            } else {
-                if let Some(cell) = self.map.get_mut(ipos.x, ipos.y) {
-                    cell.height += transfer;
-                }
-                if let Some(cell) = self.map.get_mut(pt.pos.x, pt.pos.y) {
-                    cell.height -= transfer;
-                }
-            }
-        }
-    }
 }
 
-/// Cheap erf approximation (duplicated here to avoid circular dep)
+/// Cheap erf approximation
 #[inline]
 fn erf_approx(x: f32) -> f32 {
     let sign = if x < 0.0 { -1.0 } else { 1.0 };

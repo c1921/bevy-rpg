@@ -6,6 +6,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::math::Vec3;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use rayon::prelude::*;
 
 // ============================================================
 //  Colormap & shading constants (from terrain-erosion-3-ways)
@@ -77,74 +78,69 @@ pub struct HeightmapImage;
 //  Image builder
 // ============================================================
 
-/// Build a Bevy Image from the world's cell data.
+/// Build a Bevy Image from the world's cell data (parallel pixel generation).
 pub fn build_heightmap_image(world: &World, view_mode: ViewMode, overlay: OverlayMode) -> Image {
     let size = WORLD_SIZE as u32;
-    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    let pixels = size as usize * size as usize;
+    let mut rgba = vec![0u8; pixels * 4];
 
     let light_dir = LIGHT_DIR.normalize();
 
-    for y in 0..WORLD_SIZE {
-        for x in 0..WORLD_SIZE {
-            let idx = ((y * WORLD_SIZE + x) * 4) as usize;
-            let Some(cell) = world.map.get(x as i32, y as i32) else {
-                continue;
-            };
+    // Parallel row-by-row: each row is 4 * WORLD_SIZE bytes, independent writes
+    rgba.par_chunks_mut(4 * WORLD_SIZE)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, chunk) in row.chunks_mut(4).enumerate() {
+                let Some(cell) = world.map.get(x as i32, y as i32) else {
+                    continue;
+                };
 
-            let h = cell.height.clamp(0.0, 1.0);
+                let h = cell.height.clamp(0.0, 1.0);
 
-            let (r, g, b) = match view_mode {
-                ViewMode::Grayscale => {
-                    // Pure grayscale height
-                    let v = h;
-                    (v, v, v)
-                }
-                ViewMode::Terrain => {
-                    // --- Multi-stop colormap ---
-                    let (cr, cg, cb) = sample_colormap(h);
+                let (r, g, b) = match view_mode {
+                    ViewMode::Grayscale => {
+                        let v = h;
+                        (v, v, v)
+                    }
+                    ViewMode::Terrain => {
+                        let (cr, cg, cb) = sample_colormap(h);
 
-                    // --- Hillshading via overlay blend ---
-                    let n = world.map.normal(x as i32, y as i32);
-                    // Exaggerate normal for stronger shading
-                    let n_exag = Vec3::new(n.x, n.y * VERT_EXAG, n.z).normalize();
-                    let shade = (n_exag.dot(light_dir)).max(0.0);
+                        let n = world.map.normal(x as i32, y as i32);
+                        let n_exag = Vec3::new(n.x, n.y * VERT_EXAG, n.z).normalize();
+                        let shade = (n_exag.dot(light_dir)).max(0.0);
 
-                    let (sr, sg, sb) = overlay_blend(shade, cr, cg, cb);
-                    (sr, sg, sb)
-                }
-            };
+                        overlay_blend(shade, cr, cg, cb)
+                    }
+                };
 
-            // --- Apply overlay ---
-            let (r, g, b) = match overlay {
-                OverlayMode::None => (r, g, b),
-                OverlayMode::Discharge => {
-                    // Blue-white wash based on discharge
-                    let d = (erf_approx_fast(0.4 * cell.discharge) * 0.5).clamp(0.0, 1.0);
-                    (
-                        lerp_f32(r, 1.0, d),
-                        lerp_f32(g, 1.0, d),
-                        lerp_f32(b, 1.0, d * 0.7),
-                    )
-                }
-                OverlayMode::Momentum => {
-                    // Red-green momentum overlay, blended on top
-                    let mx = (0.5 * (1.0 + erf_approx_fast(cell.momentum_x))).clamp(0.0, 1.0);
-                    let my = (0.5 * (1.0 + erf_approx_fast(cell.momentum_y))).clamp(0.0, 1.0);
-                    let alpha = 0.6;
-                    (
-                        lerp_f32(r, mx, alpha),
-                        lerp_f32(g, my, alpha),
-                        lerp_f32(b, 0.5, alpha),
-                    )
-                }
-            };
+                let (r, g, b) = match overlay {
+                    OverlayMode::None => (r, g, b),
+                    OverlayMode::Discharge => {
+                        let d = (erf_approx_fast(0.4 * cell.discharge) * 0.5).clamp(0.0, 1.0);
+                        (
+                            lerp_f32(r, 1.0, d),
+                            lerp_f32(g, 1.0, d),
+                            lerp_f32(b, 1.0, d * 0.7),
+                        )
+                    }
+                    OverlayMode::Momentum => {
+                        let mx = (0.5 * (1.0 + erf_approx_fast(cell.momentum_x))).clamp(0.0, 1.0);
+                        let my = (0.5 * (1.0 + erf_approx_fast(cell.momentum_y))).clamp(0.0, 1.0);
+                        let alpha = 0.6;
+                        (
+                            lerp_f32(r, mx, alpha),
+                            lerp_f32(g, my, alpha),
+                            lerp_f32(b, 0.5, alpha),
+                        )
+                    }
+                };
 
-            rgba[idx] = (r * 255.0) as u8;
-            rgba[idx + 1] = (g * 255.0) as u8;
-            rgba[idx + 2] = (b * 255.0) as u8;
-            rgba[idx + 3] = 255;
-        }
-    }
+                chunk[0] = (r * 255.0) as u8;
+                chunk[1] = (g * 255.0) as u8;
+                chunk[2] = (b * 255.0) as u8;
+                chunk[3] = 255;
+            }
+        });
 
     Image::new(
         Extent3d {

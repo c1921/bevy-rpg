@@ -7,3 +7,4 @@ edition = "2024"
 bevy = { version = "0.18.1", default-features = false, features = ["2d"] }
 fastnoise-lite = "1"
 rand = "0.8"
+rayon = "1"

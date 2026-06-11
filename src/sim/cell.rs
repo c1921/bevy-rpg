@@ -1,6 +1,6 @@
 // cell.rs — Core data model: Cell, WorldMap, and constants
 
-use bevy::math::{Vec2, Vec3};
+use bevy::math::{IVec2, Vec2, Vec3};
 
 // ============================================================
 //  Constants (matching original quad:: namespace)
@@ -18,6 +18,10 @@ pub const WORLD_AREA: usize = MAP_AREA * TILE_AREA;  // unused, kept for referen
 
 pub const LOD_SIZE: i32 = 1;
 pub const LOD_SIZE_F: f32 = 1.0;
+
+// Erosion constants (shared between World and WorldMap)
+pub const SETTLING: f32 = 0.8;
+pub const MAXDIFF: f32 = 0.01;
 
 // ============================================================
 //  Cell — interleaved cell data (matching quad::cell)
@@ -200,6 +204,175 @@ impl WorldMap {
 
     pub fn get_cell_mut(&mut self, pos: Vec2) -> Option<&mut Cell> {
         self.get_mut(pos.x.floor() as i32, pos.y.floor() as i32)
+    }
+
+    /// Cascade settling: propagate excess height to lower neighbors (serial, reads/writes self.cells)
+    #[allow(dead_code)]
+    pub fn cascade(&mut self, pos: Vec2) {
+        let ipos = IVec2::new(pos.x.floor() as i32, pos.y.floor() as i32);
+
+        let neighbors: [(i32, i32); 8] = [
+            (-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1),
+        ];
+
+        struct Pt { idx: usize, h: f32, d: f32 }
+        let mut pts: [Option<Pt>; 8] = [None, None, None, None, None, None, None, None];
+        let mut num = 0;
+
+        for (dx, dy) in &neighbors {
+            let nx = ipos.x + LOD_SIZE * dx;
+            let ny = ipos.y + LOD_SIZE * dy;
+            if self.oob_i(nx, ny) { continue; }
+            let idx = self.index(nx, ny);
+            let d = Vec2::new(*dx as f32, *dy as f32).length();
+            pts[num] = Some(Pt { idx, h: self.cells[idx].height, d });
+            num += 1;
+        }
+
+        // Sort by height ascending (unstable — fine for ≤8 elements)
+        let mut refs: [Option<&Pt>; 8] = [None, None, None, None, None, None, None, None];
+        for i in 0..num { refs[i] = pts[i].as_ref(); }
+        refs[..num].sort_unstable_by(|a, b| a.unwrap().h.partial_cmp(&b.unwrap().h).unwrap());
+
+        let cur_idx = self.index(ipos.x, ipos.y);
+        let cur_h = self.cells[cur_idx].height;
+
+        for opt in &refs[..num] {
+            let pt = opt.unwrap();
+            let diff = cur_h - pt.h;
+            if diff == 0.0 { continue; }
+            let excess = if pt.h > 0.1 {
+                diff.abs() - pt.d * MAXDIFF * LOD_SIZE_F
+            } else {
+                diff.abs()
+            };
+            if excess <= 0.0 { continue; }
+            let transfer = SETTLING * excess / 2.0;
+            if diff > 0.0 {
+                self.cells[cur_idx].height -= transfer;
+                self.cells[pt.idx].height += transfer;
+            } else {
+                self.cells[cur_idx].height += transfer;
+                self.cells[pt.idx].height -= transfer;
+            }
+        }
+    }
+
+    /// Parallel-safe cascade: reads base height from self + delta, writes to delta.
+    /// Used inside per-thread erosion loops.
+    pub fn cascade_delta(&self, height_delta: &mut [f32], pos: Vec2) {
+        let ipos = IVec2::new(pos.x.floor() as i32, pos.y.floor() as i32);
+
+        let neighbors: [(i32, i32); 8] = [
+            (-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1),
+        ];
+
+        struct Pt { idx: usize, h: f32, d: f32 }
+        let mut pts: [Option<Pt>; 8] = [None, None, None, None, None, None, None, None];
+        let mut num = 0;
+
+        for (dx, dy) in &neighbors {
+            let nx = ipos.x + LOD_SIZE * dx;
+            let ny = ipos.y + LOD_SIZE * dy;
+            if self.oob_i(nx, ny) { continue; }
+            let idx = self.index(nx, ny);
+            let d = Vec2::new(*dx as f32, *dy as f32).length();
+            pts[num] = Some(Pt { idx, h: self.cells[idx].height + height_delta[idx], d });
+            num += 1;
+        }
+
+        let mut refs: [Option<&Pt>; 8] = [None, None, None, None, None, None, None, None];
+        for i in 0..num { refs[i] = pts[i].as_ref(); }
+        refs[..num].sort_unstable_by(|a, b| a.unwrap().h.partial_cmp(&b.unwrap().h).unwrap());
+
+        let cur_idx = self.index(ipos.x, ipos.y);
+        let cur_h = self.cells[cur_idx].height + height_delta[cur_idx];
+
+        for opt in &refs[..num] {
+            let pt = opt.unwrap();
+            let diff = cur_h - pt.h;
+            if diff == 0.0 { continue; }
+            let excess = if pt.h > 0.1 {
+                diff.abs() - pt.d * MAXDIFF * LOD_SIZE_F
+            } else {
+                diff.abs()
+            };
+            if excess <= 0.0 { continue; }
+            let transfer = SETTLING * excess / 2.0;
+            if diff > 0.0 {
+                height_delta[cur_idx] -= transfer;
+                height_delta[pt.idx] += transfer;
+            } else {
+                height_delta[cur_idx] += transfer;
+                height_delta[pt.idx] -= transfer;
+            }
+        }
+    }
+
+    /// Bilinear-interpolated height from base + delta (for parallel droplet use)
+    #[inline]
+    pub fn height_f_delta(&self, height_delta: &[f32], pos: Vec2) -> f32 {
+        let x0 = pos.x.floor() as i32;
+        let y0 = pos.y.floor() as i32;
+        let fx = pos.x - x0 as f32;
+        let fy = pos.y - y0 as f32;
+
+        let h = |x: i32, y: i32| -> f32 {
+            if self.oob_i(x, y) { return 0.0; }
+            let idx = self.index(x, y);
+            self.cells[idx].height + height_delta[idx]
+        };
+
+        let h00 = h(x0, y0);
+        let h10 = h(x0 + 1, y0);
+        let h01 = h(x0, y0 + 1);
+        let h11 = h(x0 + 1, y0 + 1);
+
+        let h0 = h00 + (h10 - h00) * fx;
+        let h1 = h01 + (h11 - h01) * fx;
+        h0 + (h1 - h0) * fy
+    }
+
+    /// Normal from base + delta (for parallel droplet use)
+    pub fn normal_delta(&self, height_delta: &[f32], x: i32, y: i32) -> Vec3 {
+        let s = Vec3::new(1.0, MAP_SCALE, 1.0);
+        let mut n = Vec3::ZERO;
+
+        let h = |x: i32, y: i32| -> f32 {
+            if self.oob_i(x, y) { return 0.0; }
+            let idx = self.index(x, y);
+            self.cells[idx].height + height_delta[idx]
+        };
+
+        let center = h(x, y);
+
+        // (+X, +Z)
+        if !self.oob_i(x + LOD_SIZE, y + LOD_SIZE) {
+            let v1 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
+            let v2 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
+            n += v1.cross(v2);
+        }
+        // (-X, -Z)
+        if !self.oob_i(x - LOD_SIZE, y - LOD_SIZE) {
+            let v1 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
+            let v2 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
+            n += v1.cross(v2);
+        }
+        // (+X, -Z)
+        if !self.oob_i(x + LOD_SIZE, y - LOD_SIZE) {
+            let v1 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
+            let v2 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
+            n += v1.cross(v2);
+        }
+        // (-X, +Z)
+        if !self.oob_i(x - LOD_SIZE, y + LOD_SIZE) {
+            let v1 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
+            let v2 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
+            n += v1.cross(v2);
+        }
+
+        if n.length() > 0.0 { n = n.normalize(); }
+        n
     }
 }
 
