@@ -27,13 +27,7 @@ const LIGHT_DIR: Vec3 = Vec3::new(-0.8, 0.5, -0.3);
 /// Vertical exaggeration applied to normals for hillshading
 const VERT_EXAG: f32 = 10.0;
 
-/// Water color from the reference project (0.25, 0.35, 0.55)
-const WATER_COLOR: (f32, f32, f32) = (0.25, 0.35, 0.55);
 
-/// Height below which we treat as water
-const WATER_LEVEL: f32 = 0.05;
-/// Transition zone width above water level for smooth shoreline
-const WATER_TRANSITION: f32 = 0.03;
 
 // ============================================================
 //  SimState resource
@@ -114,28 +108,7 @@ pub fn build_heightmap_image(world: &World, view_mode: ViewMode, overlay: Overla
                     let shade = (n_exag.dot(light_dir)).max(0.0);
 
                     let (sr, sg, sb) = overlay_blend(shade, cr, cg, cb);
-
-                    // --- Water tint ---
-                    if h < WATER_LEVEL {
-                        // Fully under water: use water color
-                        let wf = ((WATER_LEVEL - h) / WATER_LEVEL).clamp(0.0, 1.0);
-                        (
-                            lerp_f32(sr, WATER_COLOR.0, wf),
-                            lerp_f32(sg, WATER_COLOR.1, wf),
-                            lerp_f32(sb, WATER_COLOR.2, wf),
-                        )
-                    } else if h < WATER_LEVEL + WATER_TRANSITION {
-                        // Transition zone: lerp from water color to terrain
-                        let wf = ((WATER_LEVEL + WATER_TRANSITION - h) / WATER_TRANSITION)
-                            .clamp(0.0, 1.0);
-                        (
-                            lerp_f32(sr, WATER_COLOR.0, wf),
-                            lerp_f32(sg, WATER_COLOR.1, wf),
-                            lerp_f32(sb, WATER_COLOR.2, wf),
-                        )
-                    } else {
-                        (sr, sg, sb)
-                    }
+                    (sr, sg, sb)
                 }
             };
 
