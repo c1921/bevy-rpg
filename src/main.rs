@@ -4,6 +4,7 @@ mod render;
 mod sim;
 
 use bevy::prelude::*;
+use bevy::window::Window;
 use render::*;
 use sim::cell::*;
 use sim::vegetation::Vegetation;
@@ -25,7 +26,13 @@ fn main() {
 
     let sim_state = SimState::new(seed);
 
-    app.add_plugins(DefaultPlugins)
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: format!("SimpleHydrology — seed {}", seed),
+            ..default()
+        }),
+        ..default()
+    }))
         .insert_resource(sim_state)
         .add_systems(Startup, setup)
         .add_systems(
@@ -35,10 +42,15 @@ fn main() {
                 erosion_system,
                 vegetation_system,
                 update_display_system,
+                update_step_counter,
             ),
         )
         .run();
 }
+
+/// Marker for the step counter text entity
+#[derive(Component)]
+struct StepCounter;
 
 fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, sim_state: Res<SimState>) {
     // Spawn 2D camera
@@ -57,6 +69,19 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, sim_state: R
         },
         Transform::from_xyz(0.0, 0.0, 0.0),
         HeightmapImage,
+    ));
+
+    // Spawn step counter text (top center)
+    commands.spawn((
+        Text2d::new("Step: 0"),
+        TextFont {
+            font_size: 18.0,
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        TextLayout::new(Justify::Center, LineBreak::NoWrap),
+        Transform::from_xyz(0.0, 380.0, 10.0),
+        StepCounter,
     ));
 }
 
@@ -140,13 +165,14 @@ fn input_system(
 }
 
 /// Run erosion cycles each frame (when not paused)
-fn erosion_system(mut sim_state: ResMut<SimState>) {
+fn erosion_system(mut sim_state: ResMut<SimState>, time: Res<Time<Real>>) {
     if sim_state.paused {
         return;
     }
 
     sim_state.world.erode(TILE_SIZE);
     sim_state.frame_count += 1;
+    sim_state.sim_time += time.delta_secs();
 }
 
 /// Run vegetation growth each frame (when not paused)
@@ -175,5 +201,18 @@ fn update_display_system(
             *existing = new_image;
             break;
         }
+    }
+}
+
+/// Update the on-screen step counter text
+fn update_step_counter(
+    sim_state: Res<SimState>,
+    mut text_query: Query<&mut Text2d, With<StepCounter>>,
+) {
+    for mut text in text_query.iter_mut() {
+        text.0 = format!(
+            "Step: {}  |  Time: {:.2}s  |  Paused: {}",
+            sim_state.frame_count, sim_state.sim_time, sim_state.paused
+        );
     }
 }

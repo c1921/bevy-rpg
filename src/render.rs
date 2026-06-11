@@ -40,6 +40,7 @@ pub struct SimState {
     pub view_mode: ViewMode,
     pub view_overlay: OverlayMode,
     pub frame_count: u64,
+    pub sim_time: f32,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -63,6 +64,7 @@ impl SimState {
             view_mode: ViewMode::Terrain,
             view_overlay: OverlayMode::None,
             frame_count: 0,
+            sim_time: 0.0,
         }
     }
 }
