@@ -57,8 +57,8 @@ pub struct SimState {
 /// The `Receiver` is not `Sync`, so we wrap it in a `Mutex` to satisfy Bevy's resource bounds.
 #[derive(Resource)]
 pub struct BurstState {
-    /// Channel to receive the World back from the worker thread.
-    pub rx: Mutex<Option<mpsc::Receiver<World>>>,
+    /// Channel to receive the World and elapsed time back from the worker thread.
+    pub rx: Mutex<Option<mpsc::Receiver<(World, f32)>>>,
     /// Total steps the worker was asked to run.
     pub total: u64,
 }

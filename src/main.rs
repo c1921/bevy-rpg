@@ -208,17 +208,17 @@ fn erosion_system(
     let rx_opt = burst_state.rx.get_mut().unwrap();
     if let Some(rx) = rx_opt.as_mut() {
         // Worker thread is/was running — try to collect its result
-        if let Ok(world) = rx.try_recv() {
+        if let Ok((world, elapsed)) = rx.try_recv() {
             // Worker sent the World back
             *rx_opt = None; // clear the receiver
             sim_state.world = Some(world);
             sim_state.frame_count = sim_state.target_steps;
-            sim_state.sim_time += time.delta_secs();
+            sim_state.sim_time += elapsed;
             sim_state.paused = true;
             sim_state.finished = true;
             info!(
-                "Background burst of {} steps complete. Paused.",
-                total
+                "Background burst of {} steps complete in {:.2}s. Paused.",
+                total, elapsed
             );
         }
         return; // burst is/was in progress — don't start a new one
@@ -251,7 +251,7 @@ fn erosion_system(
 
         let remaining = sim_state.target_steps.saturating_sub(sim_state.frame_count);
 
-        let (tx, rx) = std::sync::mpsc::channel::<crate::sim::world::World>();
+        let (tx, rx) = std::sync::mpsc::channel::<(crate::sim::world::World, f32)>();
         {
             let rx_opt2 = burst_state.rx.get_mut().unwrap();
             *rx_opt2 = Some(rx);
@@ -274,7 +274,7 @@ fn erosion_system(
             }
             let elapsed = start.elapsed().as_secs_f32();
             println!("Background burst {} steps in {:.2}s.", remaining, elapsed);
-            tx.send(w).ok();
+            tx.send((w, elapsed)).ok();
         });
     }
 }
