@@ -105,7 +105,7 @@ pub fn build_heightmap_image(world: &World, view_mode: ViewMode, overlay: Overla
                     ViewMode::Terrain => {
                         let (cr, cg, cb) = sample_colormap(h);
 
-                        let n = world.map.normal(x as i32, y as i32);
+                        let n = cell.cached_normal;
                         let n_exag = Vec3::new(n.x, n.y * VERT_EXAG, n.z).normalize();
                         let shade = (n_exag.dot(light_dir)).max(0.0);
 
@@ -116,7 +116,7 @@ pub fn build_heightmap_image(world: &World, view_mode: ViewMode, overlay: Overla
                 let (r, g, b) = match overlay {
                     OverlayMode::None => (r, g, b),
                     OverlayMode::Discharge => {
-                        let d = (erf_approx_fast(0.4 * cell.discharge) * 0.5).clamp(0.0, 1.0);
+                        let d = (crate::sim::cell::erf_approx(0.4 * cell.discharge) * 0.5).clamp(0.0, 1.0);
                         (
                             lerp_f32(r, 1.0, d),
                             lerp_f32(g, 1.0, d),
@@ -124,8 +124,8 @@ pub fn build_heightmap_image(world: &World, view_mode: ViewMode, overlay: Overla
                         )
                     }
                     OverlayMode::Momentum => {
-                        let mx = (0.5 * (1.0 + erf_approx_fast(cell.momentum_x))).clamp(0.0, 1.0);
-                        let my = (0.5 * (1.0 + erf_approx_fast(cell.momentum_y))).clamp(0.0, 1.0);
+                        let mx = (0.5 * (1.0 + crate::sim::cell::erf_approx(cell.momentum_x))).clamp(0.0, 1.0);
+                        let my = (0.5 * (1.0 + crate::sim::cell::erf_approx(cell.momentum_y))).clamp(0.0, 1.0);
                         let alpha = 0.6;
                         (
                             lerp_f32(r, mx, alpha),
@@ -200,14 +200,4 @@ fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
 
-fn erf_approx_fast(x: f32) -> f32 {
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * x);
-    let y = 1.0
-        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
-            + 0.254829592)
-            * t
-            * (-x * x).exp();
-    sign * y
-}
+

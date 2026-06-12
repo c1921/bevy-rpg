@@ -11,6 +11,25 @@ pub struct World {
     pub map: WorldMap,
     pub seed: u32,
     pub frame: u64,
+    /// Pre-allocated per-thread delta buffers (avoid per-frame allocation).
+    thread_bufs: Vec<ThreadBuf>,
+}
+
+/// One set of thread-local delta arrays.
+struct ThreadBuf {
+    height_delta: Vec<f32>,
+    discharge_track: Vec<f32>,
+    momentum_x_track: Vec<f32>,
+    momentum_y_track: Vec<f32>,
+}
+
+impl ThreadBuf {
+    fn zero(&mut self) {
+        self.height_delta.fill(0.0);
+        self.discharge_track.fill(0.0);
+        self.momentum_x_track.fill(0.0);
+        self.momentum_y_track.fill(0.0);
+    }
 }
 
 impl World {
@@ -23,6 +42,7 @@ impl World {
             map: WorldMap::new(),
             seed,
             frame: 0,
+            thread_bufs: Vec::new(),
         };
         world.generate();
         world
@@ -92,12 +112,15 @@ impl World {
                 for (x, cell) in row.iter_mut().enumerate() {
                     let px = x as f32 / TILE_SIZE as f32;
                     let scale_val = noise2.get_noise_2d(px, py);
-                    let d = 0.1 + 0.5 * (1.0 + erf_approx(2.0 * scale_val));
+                    let d = 0.1 + 0.5 * (1.0 + crate::sim::cell::erf_approx(2.0 * scale_val));
                     cell.height = d * ((cell.height - min) / range);
                 }
             });
 
         println!("... height generation complete");
+
+        // Precompute normals for rendering
+        self.map.recompute_normals();
     }
 
     /// Run `cycles` erosion iterations over the whole map (parallel).
@@ -107,16 +130,21 @@ impl World {
         let num_threads = rayon::current_num_threads().min(cycles.max(1));
         let per_thread = cycles / num_threads;
 
+        // Ensure pre-allocated buffers exist and are zeroed
+        self.ensure_bufs(num_threads);
+        // Zero in parallel (each buffer is independent)
+        self.thread_bufs[..num_threads]
+            .par_iter_mut()
+            .for_each(|buf| buf.zero());
+
         let base_seed = self.seed as u64 ^ (self.frame.wrapping_mul(0x9E3779B97F4A7C15));
 
-        // === Phase 1: Parallel droplet execution with thread-local deltas ===
-        let thread_results: Vec<_> = (0..num_threads).into_par_iter().map(|t| {
-            // Thread-local delta arrays
-            let mut height_delta = vec![0.0f32; WORLD_AREA];
-            let mut discharge_track = vec![0.0f32; WORLD_AREA];
-            let mut momentum_x_track = vec![0.0f32; WORLD_AREA];
-            let mut momentum_y_track = vec![0.0f32; WORLD_AREA];
+        // Split borrows: map is read-only, bufs are thread-local mutable
+        let map = &self.map;
+        let bufs = &mut self.thread_bufs;
 
+        // === Phase 1: Parallel droplet execution with thread-local deltas ===
+        bufs[..num_threads].par_iter_mut().enumerate().for_each(|(t, buf)| {
             let thread_seed = base_seed ^ ((t as u64).wrapping_mul(0xDEADBEEF));
             let mut rng = rand::rngs::StdRng::seed_from_u64(thread_seed);
 
@@ -126,80 +154,70 @@ impl World {
                 per_thread
             };
 
+            let height_delta = &mut buf.height_delta;
+            let discharge_track = &mut buf.discharge_track;
+            let momentum_x_track = &mut buf.momentum_x_track;
+            let momentum_y_track = &mut buf.momentum_y_track;
+
             for _ in 0..n {
                 let rx = rng.gen_range(0..TILE_SIZE as i32);
                 let ry = rng.gen_range(0..TILE_SIZE as i32);
                 let newpos = Vec2::new(rx as f32, ry as f32);
 
-                // Check spawn height against base + delta
-                if self.map.height_f_delta(&height_delta, newpos) < 0.1 {
+                if map.height_f_delta(height_delta, newpos) < 0.1 {
                     continue;
                 }
 
                 let mut drop = Drop::new(newpos);
                 while drop.descend_delta(
-                    &self.map,
-                    &mut height_delta,
-                    &mut discharge_track,
-                    &mut momentum_x_track,
-                    &mut momentum_y_track,
+                    map,
+                    height_delta,
+                    discharge_track,
+                    momentum_x_track,
+                    momentum_y_track,
                 ) {
-                    // Cascade after each step (within thread-local delta)
-                    self.map.cascade_delta(&mut height_delta, drop.pos);
+                    map.cascade_delta(height_delta, drop.pos);
                 }
             }
-
-            (height_delta, discharge_track, momentum_x_track, momentum_y_track)
-        }).collect();
-
-        // === Phase 2: Reset main track fields (parallel) ===
-        self.map.cells.par_iter_mut().for_each(|c| {
-            c.discharge_track = 0.0;
-            c.momentum_x_track = 0.0;
-            c.momentum_y_track = 0.0;
         });
 
-        // === Phase 3: Merge thread results into main grid ===
-        // Height: average deltas across threads, track: sum deltas across threads
+        // === Phase 2: Merge thread results + leak track into display (single pass) ===
         let nf = num_threads as f32;
+        let bufs = &self.thread_bufs; // immutable borrow for reading
         self.map.cells.par_iter_mut().enumerate().for_each(|(i, cell)| {
             let mut h_sum = 0.0f32;
             let mut dt_sum = 0.0f32;
             let mut mxt_sum = 0.0f32;
             let mut myt_sum = 0.0f32;
-            for result in &thread_results {
-                h_sum += result.0[i];
-                dt_sum += result.1[i];
-                mxt_sum += result.2[i];
-                myt_sum += result.3[i];
+            for t in 0..num_threads {
+                let buf = &bufs[t];
+                h_sum += buf.height_delta[i];
+                dt_sum += buf.discharge_track[i];
+                mxt_sum += buf.momentum_x_track[i];
+                myt_sum += buf.momentum_y_track[i];
             }
             cell.height += h_sum / nf;
-            cell.discharge_track = dt_sum;
-            cell.momentum_x_track = mxt_sum;
-            cell.momentum_y_track = myt_sum;
+            cell.discharge = (1.0 - Self::LRATE) * cell.discharge + Self::LRATE * dt_sum;
+            cell.momentum_x = (1.0 - Self::LRATE) * cell.momentum_x + Self::LRATE * mxt_sum;
+            cell.momentum_y = (1.0 - Self::LRATE) * cell.momentum_y + Self::LRATE * myt_sum;
         });
 
-        // === Phase 4: Leak track values into display fields (parallel) ===
-        self.map.cells.par_iter_mut().for_each(|c| {
-            c.discharge = (1.0 - Self::LRATE) * c.discharge + Self::LRATE * c.discharge_track;
-            c.momentum_x = (1.0 - Self::LRATE) * c.momentum_x + Self::LRATE * c.momentum_x_track;
-            c.momentum_y = (1.0 - Self::LRATE) * c.momentum_y + Self::LRATE * c.momentum_y_track;
-        });
+        // Refresh cached normals after height change
+        self.map.recompute_normals();
 
         self.frame += 1;
     }
+
+    /// Ensure `thread_bufs` has at least `n` allocated entries.
+    fn ensure_bufs(&mut self, n: usize) {
+        while self.thread_bufs.len() < n {
+            self.thread_bufs.push(ThreadBuf {
+                height_delta: vec![0.0f32; WORLD_AREA],
+                discharge_track: vec![0.0f32; WORLD_AREA],
+                momentum_x_track: vec![0.0f32; WORLD_AREA],
+                momentum_y_track: vec![0.0f32; WORLD_AREA],
+            });
+        }
+    }
 }
 
-/// Cheap erf approximation
-#[inline]
-fn erf_approx(x: f32) -> f32 {
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * x);
-    let y = 1.0
-        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
-            + 0.254829592)
-            * t
-            * (-x * x).exp();
-    sign * y
-}

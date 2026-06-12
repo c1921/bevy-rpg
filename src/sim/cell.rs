@@ -39,6 +39,10 @@ pub struct Cell {
     pub momentum_y_track: f32,
 
     pub root_density: f32,
+
+    /// Precomputed surface normal (updated after generation and erosion).
+    /// Used by the render path to avoid per-pixel normal recomputation.
+    pub cached_normal: bevy::math::Vec3,
 }
 
 impl Default for Cell {
@@ -52,6 +56,7 @@ impl Default for Cell {
             momentum_x_track: 0.0,
             momentum_y_track: 0.0,
             root_density: 0.0,
+            cached_normal: bevy::math::Vec3::Y,
         }
     }
 }
@@ -159,43 +164,25 @@ impl WorldMap {
 
     /// Normal at integer position, matching original quad::_normal
     pub fn normal(&self, x: i32, y: i32) -> Vec3 {
-        let s = Vec3::new(1.0, MAP_SCALE, 1.0);
-        let mut n = Vec3::ZERO;
+        compute_normal(&self.cells, x, y)
+    }
 
-        let h = self.height_i(x, y);
-
-        // (+X, +Z) plane
-        if !self.oob_i(x + LOD_SIZE, y + LOD_SIZE) {
-            let v1 = s * Vec3::new(0.0, self.height_i(x, y + LOD_SIZE) - h, 1.0);
-            let v2 = s * Vec3::new(1.0, self.height_i(x + LOD_SIZE, y) - h, 0.0);
-            n += v1.cross(v2);
-        }
-
-        // (-X, -Z) plane
-        if !self.oob_i(x - LOD_SIZE, y - LOD_SIZE) {
-            let v1 = s * Vec3::new(0.0, self.height_i(x, y - LOD_SIZE) - h, -1.0);
-            let v2 = s * Vec3::new(-1.0, self.height_i(x - LOD_SIZE, y) - h, 0.0);
-            n += v1.cross(v2);
-        }
-
-        // (+X, -Z) plane
-        if !self.oob_i(x + LOD_SIZE, y - LOD_SIZE) {
-            let v1 = s * Vec3::new(1.0, self.height_i(x + LOD_SIZE, y) - h, 0.0);
-            let v2 = s * Vec3::new(0.0, self.height_i(x, y - LOD_SIZE) - h, -1.0);
-            n += v1.cross(v2);
-        }
-
-        // (-X, +Z) plane
-        if !self.oob_i(x - LOD_SIZE, y + LOD_SIZE) {
-            let v1 = s * Vec3::new(-1.0, self.height_i(x - LOD_SIZE, y) - h, 0.0);
-            let v2 = s * Vec3::new(0.0, self.height_i(x, y + LOD_SIZE) - h, 1.0);
-            n += v1.cross(v2);
-        }
-
-        if n.length() > 0.0 {
-            n = n.normalize();
-        }
-        n
+    /// Recompute cached normals for every cell (parallel).
+    /// Call after any bulk height change (generation, erosion merge).
+    pub fn recompute_normals(&mut self) {
+        use rayon::prelude::*;
+        let normals: Vec<Vec3> = (0..self.cells.len())
+            .into_par_iter()
+            .map(|idx| {
+                let x = (idx / WORLD_SIZE) as i32;
+                let y = (idx % WORLD_SIZE) as i32;
+                compute_normal(&self.cells, x, y)
+            })
+            .collect();
+        self.cells
+            .iter_mut()
+            .zip(normals)
+            .for_each(|(cell, n)| cell.cached_normal = n);
     }
 
     pub fn get_cell(&self, pos: Vec2) -> Option<&Cell> {
@@ -338,37 +325,69 @@ impl WorldMap {
         let s = Vec3::new(1.0, MAP_SCALE, 1.0);
         let mut n = Vec3::ZERO;
 
-        let h = |x: i32, y: i32| -> f32 {
-            if self.oob_i(x, y) { return 0.0; }
-            let idx = self.index(x, y);
-            self.cells[idx].height + height_delta[idx]
-        };
+        // Interior fast path: 99.2% of cells — all neighbors guaranteed in bounds
+        let interior = x > 0 && y > 0 && x < WORLD_SIZE as i32 - 1 && y < WORLD_SIZE as i32 - 1;
+        if interior {
+            let idx = |x: i32, y: i32| -> usize { (x as usize) * WORLD_SIZE + (y as usize) };
+            let h = |x: i32, y: i32| -> f32 {
+                let i = idx(x, y);
+                self.cells[i].height + height_delta[i]
+            };
+            let center = h(x, y);
 
-        let center = h(x, y);
+            // (+X, +Z)
+            {
+                let v1 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
+                let v2 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
+                n += v1.cross(v2);
+            }
+            // (-X, -Z)
+            {
+                let v1 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
+                let v2 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
+                n += v1.cross(v2);
+            }
+            // (+X, -Z)
+            {
+                let v1 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
+                let v2 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
+                n += v1.cross(v2);
+            }
+            // (-X, +Z)
+            {
+                let v1 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
+                let v2 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
+                n += v1.cross(v2);
+            }
+        } else {
+            // Boundary slow path: check each corner
+            let h = |x: i32, y: i32| -> f32 {
+                if self.oob_i(x, y) { return 0.0; }
+                let idx = self.index(x, y);
+                self.cells[idx].height + height_delta[idx]
+            };
+            let center = h(x, y);
 
-        // (+X, +Z)
-        if !self.oob_i(x + LOD_SIZE, y + LOD_SIZE) {
-            let v1 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
-            let v2 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
-            n += v1.cross(v2);
-        }
-        // (-X, -Z)
-        if !self.oob_i(x - LOD_SIZE, y - LOD_SIZE) {
-            let v1 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
-            let v2 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
-            n += v1.cross(v2);
-        }
-        // (+X, -Z)
-        if !self.oob_i(x + LOD_SIZE, y - LOD_SIZE) {
-            let v1 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
-            let v2 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
-            n += v1.cross(v2);
-        }
-        // (-X, +Z)
-        if !self.oob_i(x - LOD_SIZE, y + LOD_SIZE) {
-            let v1 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
-            let v2 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
-            n += v1.cross(v2);
+            if !self.oob_i(x + LOD_SIZE, y + LOD_SIZE) {
+                let v1 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
+                let v2 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
+                n += v1.cross(v2);
+            }
+            if !self.oob_i(x - LOD_SIZE, y - LOD_SIZE) {
+                let v1 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
+                let v2 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
+                n += v1.cross(v2);
+            }
+            if !self.oob_i(x + LOD_SIZE, y - LOD_SIZE) {
+                let v1 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
+                let v2 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
+                n += v1.cross(v2);
+            }
+            if !self.oob_i(x - LOD_SIZE, y + LOD_SIZE) {
+                let v1 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
+                let v2 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
+                n += v1.cross(v2);
+            }
         }
 
         if n.length() > 0.0 { n = n.normalize(); }
@@ -378,10 +397,62 @@ impl WorldMap {
 
 /// Cheap erf approximation (Abramowitz & Stegun 7.1.26)
 #[inline]
-fn erf_approx(x: f32) -> f32 {
+pub(crate) fn erf_approx(x: f32) -> f32 {
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let x = x.abs();
     let t = 1.0 / (1.0 + 0.3275911 * x);
     let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
     sign * y
+}
+
+/// Compute surface normal from a raw cell slice at integer position (x,y).
+/// Standalone function so it can be called from parallel iterators.
+#[inline]
+pub(crate) fn compute_normal(cells: &[Cell], x: i32, y: i32) -> Vec3 {
+    let s = Vec3::new(1.0, MAP_SCALE, 1.0);
+    let mut n = Vec3::ZERO;
+
+    let oob = |x: i32, y: i32| -> bool {
+        x < 0 || y < 0 || x >= WORLD_SIZE as i32 || y >= WORLD_SIZE as i32
+    };
+
+    let h = |x: i32, y: i32| -> f32 {
+        if oob(x, y) { return 0.0; }
+        cells[(x as usize) * WORLD_SIZE + (y as usize)].height
+    };
+
+    let center = h(x, y);
+
+    // (+X, +Z) plane
+    if !oob(x + LOD_SIZE, y + LOD_SIZE) {
+        let v1 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
+        let v2 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
+        n += v1.cross(v2);
+    }
+
+    // (-X, -Z) plane
+    if !oob(x - LOD_SIZE, y - LOD_SIZE) {
+        let v1 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
+        let v2 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
+        n += v1.cross(v2);
+    }
+
+    // (+X, -Z) plane
+    if !oob(x + LOD_SIZE, y - LOD_SIZE) {
+        let v1 = s * Vec3::new(1.0, h(x + LOD_SIZE, y) - center, 0.0);
+        let v2 = s * Vec3::new(0.0, h(x, y - LOD_SIZE) - center, -1.0);
+        n += v1.cross(v2);
+    }
+
+    // (-X, +Z) plane
+    if !oob(x - LOD_SIZE, y + LOD_SIZE) {
+        let v1 = s * Vec3::new(-1.0, h(x - LOD_SIZE, y) - center, 0.0);
+        let v2 = s * Vec3::new(0.0, h(x, y + LOD_SIZE) - center, 1.0);
+        n += v1.cross(v2);
+    }
+
+    if n.length() > 0.0 {
+        n = n.normalize();
+    }
+    n
 }

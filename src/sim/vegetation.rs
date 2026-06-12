@@ -27,7 +27,7 @@ impl Plant {
     }
 
     /// Check if this plant should die
-    pub fn die(&self, world: &World, seed: u64) -> bool {
+    pub fn die(&self, world: &World, rng: &mut impl Rng) -> bool {
         if world.map.discharge_f(self.pos) >= Self::MAX_DISCHARGE {
             return true;
         }
@@ -35,7 +35,6 @@ impl Plant {
             return true;
         }
         // Random death: 1 in 1000 chance
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         rng.gen_range(0..1000) == 0
     }
 
@@ -45,9 +44,10 @@ impl Plant {
             return false;
         }
         let ipos = pos.as_ivec2();
-        let n = world.map.normal(ipos.x, ipos.y);
-        if n.y < Self::MAX_STEEP {
-            return false;
+        if let Some(cell) = world.map.get(ipos.x, ipos.y) {
+            if cell.cached_normal.y < Self::MAX_STEEP {
+                return false;
+            }
         }
         if world.map.height_f(pos) >= Self::MAX_TREE_HEIGHT {
             return false;
@@ -112,8 +112,7 @@ impl Vegetation {
             self.plants[i].grow();
 
             // Die?
-            let die_seed = seed.wrapping_add(i as u64).wrapping_mul(6364136223846793005);
-            if self.plants[i].die(world, die_seed) {
+            if self.plants[i].die(world, &mut rng) {
                 // Remove root influence
                 let pos = self.plants[i].pos;
                 self.root_at(world, pos, -1.0);
@@ -146,8 +145,10 @@ impl Vegetation {
                 }
 
                 let ipos = npos.as_ivec2();
-                let n = world.map.normal(ipos.x, ipos.y);
-                if n.y <= Plant::MAX_STEEP {
+                let normal_y = world.map.get(ipos.x, ipos.y)
+                    .map(|c| c.cached_normal.y)
+                    .unwrap_or(0.0);
+                if normal_y <= Plant::MAX_STEEP {
                     i += 1;
                     continue;
                 }
