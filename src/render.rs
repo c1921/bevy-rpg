@@ -7,6 +7,7 @@ use bevy::math::Vec3;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use rayon::prelude::*;
+use std::sync::{mpsc, Mutex};
 
 // ============================================================
 //  Colormap & shading constants (from terrain-erosion-3-ways)
@@ -36,12 +37,30 @@ const VERT_EXAG: f32 = 10.0;
 
 #[derive(Resource)]
 pub struct SimState {
-    pub world: World,
+    /// Owned World; None while a background burst is running.
+    pub world: Option<World>,
     pub paused: bool,
     pub view_mode: ViewMode,
     pub view_overlay: OverlayMode,
     pub frame_count: u64,
     pub sim_time: f32,
+    /// Target step count for burst / auto-stop (default 1000)
+    pub target_steps: u64,
+    /// When true, render every frame (real-time preview). When false, burst-run without redraw.
+    pub live_preview: bool,
+    /// Set to true when frame_count reaches target_steps
+    pub finished: bool,
+}
+
+/// Tracks a background burst computation.
+///
+/// The `Receiver` is not `Sync`, so we wrap it in a `Mutex` to satisfy Bevy's resource bounds.
+#[derive(Resource)]
+pub struct BurstState {
+    /// Channel to receive the World back from the worker thread.
+    pub rx: Mutex<Option<mpsc::Receiver<World>>>,
+    /// Total steps the worker was asked to run.
+    pub total: u64,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -60,12 +79,15 @@ pub enum OverlayMode {
 impl SimState {
     pub fn new(seed: u32) -> Self {
         Self {
-            world: World::new(seed),
+            world: Some(World::new(seed)),
             paused: true, // PAUSED BY DEFAULT (matching original)
             view_mode: ViewMode::Terrain,
             view_overlay: OverlayMode::None,
             frame_count: 0,
             sim_time: 0.0,
+            target_steps: 1000,
+            live_preview: false,  // fast mode by default
+            finished: false,
         }
     }
 }
