@@ -20,3 +20,8 @@ pub const WORLD_HALF: f64 = 25_000.0;
 
 /// Full world diagonal (for Sprite custom_size).
 pub const WORLD_SIZE: f32 = (WORLD_HALF as f32) * 2.0;
+
+/// Padding cells added around the erosion heightmap so edge mountains
+/// have space to erode outward.  The visible region is cropped back to
+/// the original GRID_COLS×GRID_ROWS after erosion.
+pub const EROSION_PADDING: usize = 64;

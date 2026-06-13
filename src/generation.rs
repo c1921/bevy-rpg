@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 
-use crate::config::{CONTOUR_INTERVAL, GRID_COLS, GRID_ROWS, LINE_WIDTH, MAX_HEIGHT, WORLD_HALF, WORLD_SIZE};
+use crate::config::{CONTOUR_INTERVAL, EROSION_PADDING, GRID_COLS, GRID_ROWS, LINE_WIDTH, MAX_HEIGHT, WORLD_HALF, WORLD_SIZE};
 use crate::contour::{marching_squares_from_flat, ContourLevel};
 use crate::resources::{Background, ContourData, ContourEntities, GenerationResult, IntermediateView, RenderMode, ViewKind, ViewSprites};
 use crate::terrain::Terrain;
@@ -21,21 +21,27 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
     let dy = (WORLD_HALF - (-WORLD_HALF)) / GRID_ROWS as f64;
     let rows = GRID_ROWS + 1;
     let cols = GRID_COLS + 1;
+    let pad = EROSION_PADDING;
+    let extended_rows = rows + 2 * pad;
+    let extended_cols = cols + 2 * pad;
 
-    // Sample the continuous terrain into a discrete heightmap.
+    // Sample the continuous terrain into an extended discrete heightmap
+    // with padding so edge mountains have room to erode outward.
     let t_noise = std::time::Instant::now();
-    let mut hm = crate::erosion::Heightmap::new(cols, rows, 0.0);
+    let mut hm = crate::erosion::Heightmap::new(extended_cols, extended_rows, 0.0);
     use rayon::prelude::*;
+    let start_x = -WORLD_HALF - pad as f64 * dx;
+    let start_y = -WORLD_HALF - pad as f64 * dy;
     hm.data.par_iter_mut().enumerate().for_each(|(idx, v)| {
-        let r = idx / cols;
-        let c = idx % cols;
-        let wx = -WORLD_HALF + c as f64 * dx;
-        let wy = -WORLD_HALF + r as f64 * dy;
+        let r = idx / extended_cols;
+        let c = idx % extended_cols;
+        let wx = start_x + c as f64 * dx;
+        let wy = start_y + r as f64 * dy;
         *v = terrain.height(wx, wy);
     });
     let noise_ms = t_noise.elapsed().as_millis();
 
-    // Normalize to [0, 1] — erosion parameters are tuned for this range.
+    // Normalize the extended grid to [0, 1].
     let h_min = hm.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
     let h_max = hm.data.iter().copied().reduce(f64::max).unwrap_or(1.0);
     let h_range = if (h_max - h_min) < 1e-12 {
@@ -44,12 +50,8 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
         h_max - h_min
     };
 
-    // Capture initial noise (simple [0,1] normalised, before underwater compression).
-    let initial_noise_hm: Vec<f32> = hm
-        .data
-        .iter()
-        .map(|&v| ((v - h_min) / h_range).clamp(0.0, 1.0) as f32)
-        .collect();
+    // Capture initial noise (simple [0,1] normalised, cropped to visible region).
+    let initial_noise_hm: Vec<f32> = hm.crop_normalized_f32(pad, cols, rows);
 
     // Normalize to [0,1] then remap [0, 0.45] → [0.4, 0.45] to compress
     // underwater relief before erosion, so erosion works on the remapped data.
@@ -62,12 +64,8 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
         };
     });
 
-    // Capture processed-noise heightmap (post-compression, pre-erosion).
-    let processed_noise_hm: Vec<f32> = hm
-        .data
-        .iter()
-        .map(|&v| v.clamp(0.0, 1.0) as f32)
-        .collect();
+    // Capture processed-noise heightmap (post-compression, pre-erosion, cropped).
+    let processed_noise_hm: Vec<f32> = hm.crop_normalized_f32(pad, cols, rows);
 
     // Re-normalize processed noise to strict [0,1] (matching Final's scale).
     let pn_min = processed_noise_hm.iter().copied().reduce(f32::min).unwrap_or(0.0);
@@ -78,16 +76,17 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
         .map(|&v| ((v - pn_min) / pn_range).clamp(0.0, 1.0))
         .collect();
 
-    // Hydraulic erosion.
+    // Hydraulic erosion on the extended grid.
     let t_erosion = std::time::Instant::now();
     let config = crate::erosion::ErosionConfig::default();
     let simulator = crate::erosion::ErosionSimulator::new(config);
     simulator.simulate(&mut hm);
     let erosion_ms = t_erosion.elapsed().as_millis();
 
-    // Re-normalize after erosion to strict [0,1].
-    let h2_min = hm.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
-    let h2_max = hm.data.iter().copied().reduce(f64::max).unwrap_or(1.0);
+    // Crop back to the visible region, then re-normalize to [0,1].
+    let mut visible = hm.crop(pad, cols, rows);
+    let h2_min = visible.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
+    let h2_max = visible.data.iter().copied().reduce(f64::max).unwrap_or(1.0);
     let h2_range = if (h2_max - h2_min) < 1e-12 {
         1.0
     } else {
@@ -95,7 +94,7 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
     };
 
     // Clone a [0,1] f32 copy for background rendering.
-    let bg_f32: Vec<f32> = hm
+    let bg_f32: Vec<f32> = visible
         .data
         .iter()
         .map(|&v| ((v - h2_min) / h2_range).clamp(0.0, 1.0) as f32)
@@ -116,14 +115,15 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
     let render_ms = t_render.elapsed().as_millis();
 
     // Scale to [0, MAX_HEIGHT] for contour extraction.
-    hm.data
+    visible
+        .data
         .iter_mut()
         .for_each(|v| *v = (*v - h2_min) / h2_range * MAX_HEIGHT);
 
     // Use flat heightmap data directly for contour extraction (no Vec<Vec<f64>> conversion).
     let t_contour = std::time::Instant::now();
     let levels = marching_squares_from_flat(
-        &hm.data,
+        &visible.data,
         cols,
         rows,
         -WORLD_HALF,

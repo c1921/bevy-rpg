@@ -62,6 +62,36 @@ impl Heightmap {
         (1.0 - ty) * ((1.0 - tx) * a00 + tx * a01)
             + ty * ((1.0 - tx) * a10 + tx * a11)
     }
+
+    /// Crop the central `crop_w`×`crop_h` rectangle from a larger
+    /// heightmap.  `padding` is the number of cells trimmed from each
+    /// edge.  Panics if the source is too small for the requested crop.
+    pub fn crop(&self, padding: usize, crop_w: usize, crop_h: usize) -> Self {
+        assert!(self.width >= crop_w + 2 * padding, "crop: source too narrow");
+        assert!(self.height >= crop_h + 2 * padding, "crop: source too short");
+        let mut out = Self::new(crop_w, crop_h, 0.0);
+        for y in 0..crop_h {
+            let src_row = (y + padding) * self.width + padding;
+            let dst_row = y * crop_w;
+            out.data[dst_row..dst_row + crop_w]
+                .copy_from_slice(&self.data[src_row..src_row + crop_w]);
+        }
+        out
+    }
+
+    /// Extract the visible (central) region of a padded heightmap into a
+    /// flat `Vec<f32>` scaled to [0, 1].
+    pub fn crop_normalized_f32(&self, padding: usize, crop_w: usize, crop_h: usize) -> Vec<f32> {
+        let cropped = self.crop(padding, crop_w, crop_h);
+        let c_min = cropped.data.iter().copied().reduce(f64::min).unwrap_or(0.0);
+        let c_max = cropped.data.iter().copied().reduce(f64::max).unwrap_or(1.0);
+        let c_range = if (c_max - c_min) < 1e-12 { 1.0 } else { c_max - c_min };
+        cropped
+            .data
+            .iter()
+            .map(|&v| ((v - c_min) / c_range).clamp(0.0, 1.0) as f32)
+            .collect()
+    }
 }
 
 // ── Gradient ─────────────────────────────────────────────────────
