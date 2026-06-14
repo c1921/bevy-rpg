@@ -258,7 +258,7 @@ pub fn particle_erosion_step(
             return;
         };
         let t0 = std::time::Instant::now();
-        let cycles = world.map.width.min(world.map.height);
+        let cycles = (world.map.width.min(world.map.height) as f32 * crate::config::RAINFALL_MULTIPLIER) as usize;
         world.erode(cycles);
         let elapsed = t0.elapsed();
 

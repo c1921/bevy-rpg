@@ -30,6 +30,11 @@ pub const EROSION_PADDING: usize = 64;
 /// Set to 2 for a half-resolution particle grid (≈4× faster erosion).
 pub const PARTICLE_SCALE: usize = 1;
 
+/// Rainfall multiplier for particle erosion.
+/// >1 = more droplets per frame → faster terrain change.
+/// Scales the number of droplets linearly.
+pub const RAINFALL_MULTIPLIER: f32 = 4.0;
+
 // ── Directional gradient (global terrain slope) ────────────────────
 
 /// Blend strength of the directional gradient (0 = pure noise, 1 = pure slope).
