@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 
-use crate::config::{CONTOUR_INTERVAL, EROSION_PADDING, GRID_COLS, GRID_ROWS, LINE_WIDTH, MAX_HEIGHT, WORLD_HALF, WORLD_SIZE};
+use crate::config::{CONTOUR_INTERVAL, EROSION_PADDING, GRADIENT_ANGLE_DEG, GRADIENT_STRENGTH, GRID_COLS, GRID_ROWS, LINE_WIDTH, MAX_HEIGHT, WORLD_HALF, WORLD_SIZE};
 use crate::contour::{marching_squares_from_flat, ContourLevel};
 use crate::resources::{Background, ContourData, ContourEntities, GenerationResult, IntermediateView, ParticleErosionState, RenderMode, ViewKind, ViewSprites};
 use crate::terrain::Terrain;
@@ -32,12 +32,30 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
     use rayon::prelude::*;
     let start_x = -WORLD_HALF - pad as f64 * dx;
     let start_y = -WORLD_HALF - pad as f64 * dy;
+
+    // ── Directional gradient (global terrain slope) ──────────────
+    let grad_angle_rad = GRADIENT_ANGLE_DEG.to_radians();
+    let grad_u = (grad_angle_rad.cos(), grad_angle_rad.sin());
+    let ext_x = WORLD_HALF + pad as f64 * dx;
+    let ext_y = WORLD_HALF + pad as f64 * dy;
+    let proj_min = -ext_x * grad_u.0.abs() - ext_y * grad_u.1.abs();
+    let proj_max = ext_x * grad_u.0.abs() + ext_y * grad_u.1.abs();
+    let proj_range = if (proj_max - proj_min) < 1e-12 { 1.0 } else { proj_max - proj_min };
+
     hm.data.par_iter_mut().enumerate().for_each(|(idx, v)| {
         let r = idx / extended_cols;
         let c = idx % extended_cols;
         let wx = start_x + c as f64 * dx;
         let wy = start_y + r as f64 * dy;
-        *v = terrain.height(wx, wy);
+        let h = terrain.height(wx, wy);
+        // Blend directional gradient: slope from high-angle to low-angle.
+        if GRADIENT_STRENGTH > 0.0 {
+            let proj = wx * grad_u.0 + wy * grad_u.1;
+            let grad = (proj - proj_min) / proj_range; // [0, 1] — 1 = high end
+            *v = h * (1.0 - GRADIENT_STRENGTH) + grad * GRADIENT_STRENGTH * MAX_HEIGHT;
+        } else {
+            *v = h;
+        }
     });
     let noise_ms = t_noise.elapsed().as_millis();
 

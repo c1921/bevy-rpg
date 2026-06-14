@@ -29,3 +29,12 @@ pub const EROSION_PADDING: usize = 64;
 /// Downscale factor for the particle-erosion grid (1 = full resolution).
 /// Set to 2 for a half-resolution particle grid (≈4× faster erosion).
 pub const PARTICLE_SCALE: usize = 1;
+
+// ── Directional gradient (global terrain slope) ────────────────────
+
+/// Blend strength of the directional gradient (0 = pure noise, 1 = pure slope).
+pub const GRADIENT_STRENGTH: f64 = 0.5;
+
+/// Direction of the gradient slope, in degrees.
+/// 0° = West-high / East-low; 90° = North-high / South-low.
+pub const GRADIENT_ANGLE_DEG: f64 = 45.0;
