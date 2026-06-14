@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 
+use crate::generation::GenerationResult;
+
 /// Cached contour data.
 #[derive(Resource)]
 pub struct ContourData {
@@ -91,27 +93,6 @@ pub struct ViewSprites {
 }
 
 // ── Async generation ───────────────────────────────────────────────
-
-/// Fully‑computed generation data, ready for asset creation on the main thread.
-///
-/// All fields are `Send + 'static` so this can cross a thread boundary.
-pub struct GenerationResult {
-    pub seed: u32,
-    pub bg_pixels: Vec<u8>,
-    pub bg_cols: usize,
-    pub bg_rows: usize,
-    pub data: ContourData,
-    /// River segments in world space (each with a per‑segment width).
-    pub rivers: Vec<crate::river::RiverSegment>,
-    /// Initial noise heightmap, normalized to [0, 1] (f32).
-    pub initial_noise_hm: Vec<f32>,
-    /// Heightmap after underwater compression, before erosion (f32).
-    pub processed_noise_hm: Vec<f32>,
-    /// processed_noise_hm re-normalized to strict [0,1] (same scale as Final).
-    pub compressed_norm_hm: Vec<f32>,
-    /// Log‑normalised drainage accumulation for the debug heatmap view.
-    pub drainage_field: Vec<f32>,
-}
 
 /// State for background terrain generation.
 /// Polled every frame; the `Arc<Mutex<…>>` receives results from the worker thread.

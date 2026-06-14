@@ -3,12 +3,15 @@ mod config;
 mod contour;
 mod erosion;
 mod generation;
+mod mesh;
 mod render;
 mod resources;
 mod river;
 mod systems;
 mod terrain;
 mod ui;
+mod ui_interaction;
+mod visibility;
 
 use bevy::prelude::*;
 use camera::{camera_control, CameraDrag};
@@ -18,9 +21,12 @@ use resources::{
 };
 use systems::{
     maintain_generation_label, poll_generation, regenerate_on_request, setup,
+};
+use visibility::{
     sync_contour_visibility, sync_river_visibility, sync_view_visibility,
 };
-use ui::{regenerate_button, spawn_ui, toggle_render_mode, select_view_mode, update_status};
+use ui::spawn_ui;
+use ui_interaction::{regenerate_button, select_view_mode, toggle_render_mode, update_status};
 
 fn main() {
     App::new()
