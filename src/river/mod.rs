@@ -22,6 +22,11 @@ pub struct RiverConfig {
     pub max_width: f32,
     /// Tiny slope added during depression filling so flat fills still drain.
     pub fill_epsilon: f64,
+    /// Minimum height (in metres, same scale as the heightmap) for a cell
+    /// to contribute rainfall.  Cells below this height produce zero runoff,
+    /// so river sources are forced above this elevation.  Set to 0.0 to
+    /// restore uniform rainfall.
+    pub min_source_height: f64,
 }
 
 impl Default for RiverConfig {
@@ -31,6 +36,7 @@ impl Default for RiverConfig {
             min_width: 18.0,
             max_width: 140.0,
             fill_epsilon: 1e-6,
+            min_source_height: 300.0,
         }
     }
 }
@@ -82,7 +88,7 @@ pub fn extract(
 
     let filled = priority_flood(heights, cols, rows, cfg.fill_epsilon);
     let flow = flow_directions(&filled, cols, rows, dx);
-    let accum = accumulate(&filled, &flow, cols, rows);
+    let accum = accumulate(&filled, &flow, cols, rows, cfg);
 
     // ── [D] Build segments from each river cell to its primary downstream. ──
     let quarter = std::f64::consts::FRAC_PI_4;
@@ -315,9 +321,14 @@ fn flow_directions(filled: &[f64], cols: usize, rows: usize, d: f64) -> Vec<Flow
 
 // ── [C] Flow accumulation ───────────────────────────────────────────────
 
-fn accumulate(filled: &[f64], flow: &[Flow], cols: usize, rows: usize) -> Vec<f64> {
+fn accumulate(filled: &[f64], flow: &[Flow], cols: usize, rows: usize, cfg: &RiverConfig) -> Vec<f64> {
     let n = cols * rows;
-    let mut accum = vec![1.0_f64; n]; // uniform rain: each cell contributes 1
+    // Height‑dependent rain: only cells at or above `min_source_height`
+    // contribute to runoff, forcing river sources into the highlands.
+    let mut accum: Vec<f64> = filled
+        .iter()
+        .map(|&h| if h >= cfg.min_source_height { 1.0_f64 } else { 0.0_f64 })
+        .collect();
 
     // Topological order = descending filled height (flow only goes downhill).
     let mut order: Vec<usize> = (0..n).collect();
