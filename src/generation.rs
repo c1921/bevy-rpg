@@ -4,9 +4,10 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 
-use crate::config::{CONTOUR_INTERVAL, EROSION_PADDING, GRID_COLS, GRID_ROWS, LINE_WIDTH, MAX_HEIGHT, WORLD_HALF, WORLD_SIZE};
+use crate::config::{CONTOUR_INTERVAL, EROSION_PADDING, GRID_COLS, GRID_ROWS, LINE_WIDTH, MAX_HEIGHT, RIVER_COLOR, RIVER_Z, WORLD_HALF, WORLD_SIZE};
 use crate::contour::{marching_squares_from_flat, ContourLevel};
-use crate::resources::{Background, ContourData, ContourEntities, GenerationResult, IntermediateView, RenderMode, ViewKind, ViewSprites};
+use crate::resources::{Background, ContourData, ContourEntities, GenerationResult, IntermediateView, RenderMode, RiverEntities, ViewKind, ViewSprites};
+use crate::river::RiverSegment;
 use crate::terrain::Terrain;
 
 /// Pure computation: noise → erosion → render pixels → contour extraction.
@@ -134,10 +135,26 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
     );
     let contour_ms = t_contour.elapsed().as_millis();
 
+    // River network extraction on the eroded, cropped grid.  Flow depends
+    // only on relative height, so the [0, MAX_HEIGHT] scaling above is fine.
+    let t_river = std::time::Instant::now();
+    let river_cfg = crate::river::RiverConfig::default();
+    let river_net = crate::river::extract(
+        &visible.data,
+        cols,
+        rows,
+        -WORLD_HALF,
+        -WORLD_HALF,
+        dx,
+        dy,
+        &river_cfg,
+    );
+    let river_ms = t_river.elapsed().as_millis();
+
     let total_ms = t_total.elapsed().as_millis();
     info!(
-        "generate seed={}: noise={}ms  erosion={}ms  render={}ms  contour={}ms  total={}ms",
-        seed, noise_ms, erosion_ms, render_ms, contour_ms, total_ms
+        "generate seed={}: noise={}ms  erosion={}ms  render={}ms  contour={}ms  river={}ms({} segs)  total={}ms",
+        seed, noise_ms, erosion_ms, render_ms, contour_ms, river_ms, river_net.segments.len(), total_ms
     );
 
     GenerationResult {
@@ -146,9 +163,11 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
         bg_cols: cols,
         bg_rows: rows,
         data: ContourData { levels },
+        rivers: river_net.segments,
         initial_noise_hm,
         processed_noise_hm,
         compressed_norm_hm,
+        drainage_field: river_net.accum_field,
     }
 }
 
@@ -163,6 +182,7 @@ pub fn apply_result(
     materials: &mut ResMut<Assets<ColorMaterial>>,
     meshes: &mut ResMut<Assets<Mesh>>,
     contour_entities: &mut ResMut<ContourEntities>,
+    river_entities: &mut ResMut<RiverEntities>,
     view_sprites: &mut ResMut<ViewSprites>,
 ) -> Handle<Image> {
     info!(
@@ -214,6 +234,16 @@ pub fn apply_result(
         materials,
         meshes,
         contour_entities,
+    );
+
+    // River mesh entities.
+    spawn_river_meshes(
+        &result.rivers,
+        render_mode,
+        commands,
+        materials,
+        meshes,
+        river_entities,
     );
 
     // Store contour data as a resource for later access.
@@ -270,9 +300,11 @@ pub fn apply_result(
     let ent_init = make_view(&result.initial_noise_hm, ViewKind::InitialNoise, commands, images);
     let ent_proc = make_view(&result.processed_noise_hm, ViewKind::ProcessedNoise, commands, images);
     let ent_cnorm = make_view(&result.compressed_norm_hm, ViewKind::CompressedNorm, commands, images);
+    let ent_drain = make_view(&result.drainage_field, ViewKind::DrainageField, commands, images);
     view_sprites.entities.insert(ViewKind::InitialNoise, ent_init);
     view_sprites.entities.insert(ViewKind::ProcessedNoise, ent_proc);
     view_sprites.entities.insert(ViewKind::CompressedNorm, ent_cnorm);
+    view_sprites.entities.insert(ViewKind::DrainageField, ent_drain);
 
     bg_handle
 }
@@ -300,6 +332,94 @@ pub fn spawn_contour_meshes(
             .id();
         contour_entities.0.push(entity);
     }
+}
+
+/// Spawn river-line mesh entities (one mesh for the whole network).
+pub fn spawn_river_meshes(
+    rivers: &[RiverSegment],
+    render_mode: &RenderMode,
+    commands: &mut Commands,
+    materials: &mut ResMut<Assets<ColorMaterial>>,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    river_entities: &mut ResMut<RiverEntities>,
+) {
+    if rivers.is_empty() {
+        return;
+    }
+    let vis = if render_mode.show_rivers {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    let color = Color::srgb(RIVER_COLOR.0, RIVER_COLOR.1, RIVER_COLOR.2);
+    let mesh = build_river_mesh(rivers);
+    let material = materials.add(ColorMaterial::from_color(color));
+    let entity = commands
+        .spawn((
+            Mesh2d(meshes.add(mesh)),
+            MeshMaterial2d(material),
+            Transform::from_xyz(0.0, 0.0, RIVER_Z),
+            vis,
+        ))
+        .id();
+    river_entities.0.push(entity);
+}
+
+/// Build a triangle-list mesh from river segments. Each segment is a quad
+/// of its own width, with small square caps at both ends so variable-width
+/// segments join without gaps.
+fn build_river_mesh(rivers: &[RiverSegment]) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    let push_quad = |p: [[f32; 3]; 4], positions: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>| {
+        let base = positions.len() as u32;
+        positions.extend_from_slice(&p);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+    };
+
+    for seg in rivers {
+        let a = Vec2::new(seg.a[0] as f32, seg.a[1] as f32);
+        let b = Vec2::new(seg.b[0] as f32, seg.b[1] as f32);
+        let dir = b - a;
+        let len = dir.length();
+        if len < 1e-6 {
+            continue;
+        }
+        let dir = dir / len;
+        let hw = seg.width * 0.5;
+        let perp = Vec2::new(-dir.y, dir.x) * hw;
+
+        push_quad(
+            [
+                [a.x - perp.x, a.y - perp.y, 0.0],
+                [a.x + perp.x, a.y + perp.y, 0.0],
+                [b.x - perp.x, b.y - perp.y, 0.0],
+                [b.x + perp.x, b.y + perp.y, 0.0],
+            ],
+            &mut positions,
+            &mut indices,
+        );
+
+        // Square cap at each endpoint to bridge width changes / direction turns.
+        for (c, w) in [(a, hw), (b, hw)] {
+            push_quad(
+                [
+                    [c.x - w, c.y - w, 0.0],
+                    [c.x + w, c.y - w, 0.0],
+                    [c.x - w, c.y + w, 0.0],
+                    [c.x + w, c.y + w, 0.0],
+                ],
+                &mut positions,
+                &mut indices,
+            );
+        }
+    }
+
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
 }
 
 /// Map elevation to a colour gradient: green (low) → olive → brown → grey (high).

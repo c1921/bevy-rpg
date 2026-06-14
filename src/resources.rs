@@ -10,6 +10,10 @@ pub struct ContourData {
 #[derive(Resource, Default)]
 pub struct ContourEntities(pub Vec<Entity>);
 
+/// Entities that hold the river-line meshes (cleared on regeneration).
+#[derive(Resource, Default)]
+pub struct RiverEntities(pub Vec<Entity>);
+
 /// Resource flag — set to true to request terrain regeneration.
 #[derive(Resource, Default)]
 pub struct RegenerateRequest(pub bool);
@@ -19,6 +23,7 @@ pub struct RegenerateRequest(pub bool);
 pub struct RenderMode {
     pub show_3d: bool,
     pub show_contours: bool,
+    pub show_rivers: bool,
 }
 
 impl Default for RenderMode {
@@ -26,6 +31,7 @@ impl Default for RenderMode {
         Self {
             show_3d: true,
             show_contours: true,
+            show_rivers: true,
         }
     }
 }
@@ -60,6 +66,7 @@ pub struct IntermediateView {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum ViewKind {
     Final,
+    DrainageField,
     CompressedNorm,
     ProcessedNoise,
     InitialNoise,
@@ -94,12 +101,16 @@ pub struct GenerationResult {
     pub bg_cols: usize,
     pub bg_rows: usize,
     pub data: ContourData,
+    /// River segments in world space (each with a per‑segment width).
+    pub rivers: Vec<crate::river::RiverSegment>,
     /// Initial noise heightmap, normalized to [0, 1] (f32).
     pub initial_noise_hm: Vec<f32>,
     /// Heightmap after underwater compression, before erosion (f32).
     pub processed_noise_hm: Vec<f32>,
     /// processed_noise_hm re-normalized to strict [0,1] (same scale as Final).
     pub compressed_norm_hm: Vec<f32>,
+    /// Log‑normalised drainage accumulation for the debug heatmap view.
+    pub drainage_field: Vec<f32>,
 }
 
 /// State for background terrain generation.

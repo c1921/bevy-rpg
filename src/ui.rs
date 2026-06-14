@@ -18,6 +18,10 @@ pub(crate) struct Toggle3DButton;
 #[derive(Component)]
 pub(crate) struct ToggleContourButton;
 
+/// Marker for the rivers toggle button.
+#[derive(Component)]
+pub(crate) struct ToggleRiverButton;
+
 /// Marker + payload for view-selection buttons (radio style).
 #[derive(Component, Clone, Copy)]
 pub(crate) struct ViewButton(pub ViewKind);
@@ -93,6 +97,22 @@ pub fn spawn_ui(mut commands: Commands) {
                         TextFont::from_font_size(16.0),
                         TextColor(Color::WHITE),
                     ));
+
+                    // Rivers toggle
+                    row.spawn((
+                        Button,
+                        ToggleRiverButton,
+                        Node {
+                            padding: UiRect::all(Val::Px(8.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgb(0.12, 0.45, 0.25)),
+                    ))
+                    .with_child((
+                        Text::new("Rivers: ON"),
+                        TextFont::from_font_size(16.0),
+                        TextColor(Color::WHITE),
+                    ));
                 });
 
             // ── view select row (radio buttons) ────────────────
@@ -106,6 +126,7 @@ pub fn spawn_ui(mut commands: Commands) {
                 .with_children(|row| {
                     for (kind, label) in [
                         (ViewKind::Final, "Final"),
+                        (ViewKind::DrainageField, "Drainage"),
                         (ViewKind::CompressedNorm, "Compressed N"),
                         (ViewKind::ProcessedNoise, "Compressed"),
                         (ViewKind::InitialNoise, "Raw Noise"),
@@ -159,7 +180,8 @@ pub fn toggle_render_mode(
     mut render_mode: ResMut<RenderMode>,
     q_3d: Query<&Interaction, (Changed<Interaction>, With<Toggle3DButton>)>,
     q_contour: Query<&Interaction, (Changed<Interaction>, With<ToggleContourButton>)>,
-    mut q_btn: Query<(&mut BackgroundColor, &Children), Or<(With<Toggle3DButton>, With<ToggleContourButton>)>>,
+    q_river: Query<&Interaction, (Changed<Interaction>, With<ToggleRiverButton>)>,
+    mut q_btn: Query<(&mut BackgroundColor, &Children), Or<(With<Toggle3DButton>, With<ToggleContourButton>, With<ToggleRiverButton>)>>,
     mut q_text: Query<&mut Text>,
 ) {
     let mut changed = false;
@@ -170,6 +192,10 @@ pub fn toggle_render_mode(
     }
     if q_contour.iter().any(|i| *i == Interaction::Pressed) {
         render_mode.show_contours = !render_mode.show_contours;
+        changed = true;
+    }
+    if q_river.iter().any(|i| *i == Interaction::Pressed) {
+        render_mode.show_rivers = !render_mode.show_rivers;
         changed = true;
     }
 
@@ -196,6 +222,15 @@ pub fn toggle_render_mode(
                             } else {
                                 *bg = BackgroundColor(Color::srgb(0.45, 0.15, 0.15));
                                 **text = "Contours: OFF".into();
+                            }
+                        }
+                        t if t.starts_with("Rivers:") => {
+                            if render_mode.show_rivers {
+                                *bg = BackgroundColor(Color::srgb(0.12, 0.45, 0.25));
+                                **text = "Rivers: ON".into();
+                            } else {
+                                *bg = BackgroundColor(Color::srgb(0.45, 0.15, 0.15));
+                                **text = "Rivers: OFF".into();
                             }
                         }
                         _ => {}

@@ -5,6 +5,7 @@ mod erosion;
 mod generation;
 mod render;
 mod resources;
+mod river;
 mod systems;
 mod terrain;
 mod ui;
@@ -13,11 +14,11 @@ use bevy::prelude::*;
 use camera::{camera_control, CameraDrag};
 use resources::{
     ContourEntities, GenerationTask, RegenerateRequest, RegenerateStatus, RenderMode,
-    ViewMode, ViewSprites,
+    RiverEntities, ViewMode, ViewSprites,
 };
 use systems::{
     maintain_generation_label, poll_generation, regenerate_on_request, setup,
-    sync_contour_visibility, sync_view_visibility,
+    sync_contour_visibility, sync_river_visibility, sync_view_visibility,
 };
 use ui::{regenerate_button, spawn_ui, toggle_render_mode, select_view_mode, update_status};
 
@@ -33,6 +34,7 @@ fn main() {
         }))
         .init_resource::<CameraDrag>()
         .init_resource::<ContourEntities>()
+        .init_resource::<RiverEntities>()
         .init_resource::<RegenerateStatus>()
         .init_resource::<RegenerateRequest>()
         .init_resource::<RenderMode>()
@@ -54,6 +56,6 @@ fn main() {
                 select_view_mode,
             ),
         )
-        .add_systems(Update, (sync_contour_visibility,))
+        .add_systems(Update, (sync_contour_visibility, sync_river_visibility))
         .run();
 }

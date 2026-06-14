@@ -25,3 +25,10 @@ pub const WORLD_SIZE: f32 = (WORLD_HALF as f32) * 2.0;
 /// have space to erode outward.  The visible region is cropped back to
 /// the original GRID_COLS×GRID_ROWS after erosion.
 pub const EROSION_PADDING: usize = 64;
+
+/// Width of rendered river lines is data‑driven (per‑segment); this is the
+/// z‑offset used so rivers draw above the background but below contours.
+pub const RIVER_Z: f32 = -0.5;
+
+/// Colour of river lines (deep water blue).
+pub const RIVER_COLOR: (f32, f32, f32) = (0.18, 0.40, 0.70);

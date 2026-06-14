@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use crate::generation;
 use crate::resources::{
     Background, ContourEntities, GenerationTask, IntermediateView, RegenerateRequest,
-    RegenerateStatus, RenderMode, ViewKind, ViewMode, ViewSprites,
+    RegenerateStatus, RenderMode, RiverEntities, ViewKind, ViewMode, ViewSprites,
 };
 
 /// Startup system: spawn camera + UI, then kick off async terrain generation.
@@ -38,6 +38,7 @@ pub fn regenerate_on_request(
     mut request: ResMut<RegenerateRequest>,
     mut commands: Commands,
     mut contour_entities: ResMut<ContourEntities>,
+    mut river_entities: ResMut<RiverEntities>,
     mut gen_task: ResMut<GenerationTask>,
     bg_query: Query<Entity, With<Background>>,
 ) {
@@ -51,6 +52,12 @@ pub fn regenerate_on_request(
         commands.entity(entity).try_despawn();
     }
     contour_entities.0.clear();
+
+    // Drop old river meshes.
+    for &entity in &river_entities.0 {
+        commands.entity(entity).try_despawn();
+    }
+    river_entities.0.clear();
 
     // Drop old background.
     if let Ok(entity) = bg_query.single() {
@@ -79,6 +86,7 @@ pub fn poll_generation(
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut contour_entities: ResMut<ContourEntities>,
+    mut river_entities: ResMut<RiverEntities>,
     mut status: ResMut<RegenerateStatus>,
     mut view_sprites: ResMut<ViewSprites>,
 ) {
@@ -98,6 +106,7 @@ pub fn poll_generation(
             &mut materials,
             &mut meshes,
             &mut contour_entities,
+            &mut river_entities,
             &mut view_sprites,
         );
         status.remaining = 0.0;
@@ -129,6 +138,25 @@ pub fn sync_contour_visibility(
 ) {
     let show = render_mode.show_contours && view_mode.kind == ViewKind::Final;
     for &entity in &contour_entities.0 {
+        if let Ok(mut vis) = vis_query.get_mut(entity) {
+            *vis = if show {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        }
+    }
+}
+
+/// Sync river-mesh visibility: shown only in the Final view when enabled.
+pub fn sync_river_visibility(
+    render_mode: Res<RenderMode>,
+    view_mode: Res<ViewMode>,
+    river_entities: Res<RiverEntities>,
+    mut vis_query: Query<&mut Visibility>,
+) {
+    let show = render_mode.show_rivers && view_mode.kind == ViewKind::Final;
+    for &entity in &river_entities.0 {
         if let Ok(mut vis) = vis_query.get_mut(entity) {
             *vis = if show {
                 Visibility::Visible
