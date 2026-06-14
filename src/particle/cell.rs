@@ -12,7 +12,7 @@ pub const LOD_SIZE: i32 = 1;
 pub const LOD_SIZE_F: f32 = 1.0;
 
 // Erosion constants (shared between World and WorldMap)
-pub const SETTLING: f32 = 0.8;
+pub const SETTLING: f32 = 0.55;
 pub const MAXDIFF: f32 = 0.01;
 
 // ============================================================

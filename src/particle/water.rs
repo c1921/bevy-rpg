@@ -3,6 +3,7 @@
 
 use super::cell::*;
 use bevy::math::Vec2;
+use rand::Rng;
 
 pub struct Drop {
     pub age: i32,
@@ -17,10 +18,12 @@ impl Drop {
     pub const MAX_AGE: i32 = 500;
     pub const MIN_VOL: f32 = 0.01;
     pub const EVAP_RATE: f32 = 0.001;
-    pub const DEPOSITION_RATE: f32 = 0.1;
-    pub const ENTRAINMENT: f32 = 10.0;
+    pub const DEPOSITION_RATE: f32 = 0.06;
+    pub const ENTRAINMENT: f32 = 25.0;
     pub const GRAVITY: f32 = 1.0;
     pub const MOMENTUM_TRANSFER: f32 = 1.0;
+    /// Random horizontal perturbation per step (creates meandering on flat terrain).
+    pub const BROWNIAN_STRENGTH: f32 = 0.015;
 
     pub fn new(pos: Vec2) -> Self {
         Self {
@@ -41,6 +44,7 @@ impl Drop {
         discharge_track: &mut [f32],
         momentum_x_track: &mut [f32],
         momentum_y_track: &mut [f32],
+        rng: &mut impl Rng,
     ) -> bool {
         let ipos = self.pos.as_ivec2();
 
@@ -95,6 +99,10 @@ impl Drop {
         if self.speed.length() > 0.0 {
             self.speed = LOD_SIZE_F * (2.0_f32).sqrt() * self.speed.normalize();
         }
+
+        // Brownian perturbation: meandering on flat terrain for channel formation.
+        self.speed.x += rng.gen_range(-Self::BROWNIAN_STRENGTH..Self::BROWNIAN_STRENGTH);
+        self.speed.y += rng.gen_range(-Self::BROWNIAN_STRENGTH..Self::BROWNIAN_STRENGTH);
 
         self.pos += self.speed;
 

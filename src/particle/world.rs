@@ -179,10 +179,6 @@ impl ParticleWorld {
                     let ry = rng.gen_range(0..w);
                     let newpos = Vec2::new(rx as f32, ry as f32);
 
-                    if map.height_f_delta(height_delta, newpos) < 0.1 {
-                        continue;
-                    }
-
                     let mut drop = Drop::new(newpos);
                     while drop.descend_delta(
                         map,
@@ -190,6 +186,7 @@ impl ParticleWorld {
                         discharge_track,
                         momentum_x_track,
                         momentum_y_track,
+                        &mut rng,
                     ) {
                         map.cascade_delta(height_delta, drop.pos);
                     }
