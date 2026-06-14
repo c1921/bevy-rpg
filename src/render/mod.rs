@@ -1,10 +1,12 @@
 mod gradient;
 mod lighting;
 mod normals;
+mod overlay;
 
 use gradient::{ocean_land_stops, sample_stops};
 use lighting::{apply_lighting, coastline_mask};
 use normals::compute_normals;
+pub use overlay::blend_overlay;
 
 /// Render a normalised heightmap `[0, 1]` into an RGBA8 pixel buffer.
 ///

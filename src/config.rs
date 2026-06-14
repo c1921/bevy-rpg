@@ -25,3 +25,7 @@ pub const WORLD_SIZE: f32 = (WORLD_HALF as f32) * 2.0;
 /// have space to erode outward.  The visible region is cropped back to
 /// the original GRID_COLS×GRID_ROWS after erosion.
 pub const EROSION_PADDING: usize = 64;
+
+/// Downscale factor for the particle-erosion grid (1 = full resolution).
+/// Set to 2 for a half-resolution particle grid (≈4× faster erosion).
+pub const PARTICLE_SCALE: usize = 1;

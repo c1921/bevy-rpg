@@ -1,6 +1,9 @@
 use bevy::prelude::*;
 
-use crate::resources::{RegenerateRequest, RegenerateStatus, RenderMode, ViewKind, ViewMode};
+use crate::resources::{
+    OverlayMode, ParticleErosionState, RegenerateRequest, RegenerateStatus,
+    RenderMode, ViewKind, ViewMode,
+};
 
 /// Marker component for the status text entity.
 #[derive(Component)]
@@ -138,6 +141,17 @@ pub fn spawn_ui(mut commands: Commands) {
                     ..default()
                 },
             ));
+
+            // ── keyboard hints (semi-transparent) ────────────────
+            parent.spawn((
+                Text::new("E:Play/Pause  M:Overlay  R:Reset"),
+                TextFont::from_font_size(12.0),
+                TextColor(Color::srgba(0.7, 0.7, 0.7, 0.5)),
+                Node {
+                    margin: UiRect::top(Val::Px(4.0)),
+                    ..default()
+                },
+            ));
         });
 }
 
@@ -207,20 +221,38 @@ pub fn toggle_render_mode(
 }
 
 /// Tick the countdown; refresh status text from the resource label.
+/// Also appends particle-erosion status when active.
 pub fn update_status(
     time: Res<Time>,
     mut status: ResMut<RegenerateStatus>,
+    particle: Res<ParticleErosionState>,
     mut q_text: Query<&mut Text, With<StatusText>>,
 ) {
     if status.remaining > 0.0 {
         status.remaining -= time.delta_secs();
     }
     if let Ok(mut text) = q_text.single_mut() {
+        let mut parts: Vec<String> = Vec::new();
+
+        // Generation label.
         if status.remaining > 0.0 {
-            **text = status.label.clone();
-        } else {
-            **text = "".into();
+            parts.push(status.label.clone());
         }
+
+        // Particle erosion status.
+        if particle.world.is_some() {
+            let paused_str = if particle.paused { "⏸" } else { "▶" };
+            parts.push(format!(
+                "Particle: {} steps {}",
+                particle.frame_count,
+                paused_str,
+            ));
+            if particle.overlay != OverlayMode::None {
+                parts.push(format!("Overlay: {:?}", particle.overlay));
+            }
+        }
+
+        **text = parts.join("  |  ");
     }
 }
 

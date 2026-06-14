@@ -2,8 +2,9 @@ use bevy::prelude::*;
 
 use crate::generation;
 use crate::resources::{
-    Background, ContourEntities, GenerationTask, IntermediateView, RegenerateRequest,
-    RegenerateStatus, RenderMode, ViewKind, ViewMode, ViewSprites,
+    Background, ContourEntities, GenerationTask, IntermediateView,
+    OverlayMode, ParticleErosionState, RegenerateRequest, RegenerateStatus, RenderMode,
+    ViewKind, ViewMode, ViewSprites,
 };
 
 /// Startup system: spawn camera + UI, then kick off async terrain generation.
@@ -39,6 +40,7 @@ pub fn regenerate_on_request(
     mut commands: Commands,
     mut contour_entities: ResMut<ContourEntities>,
     mut gen_task: ResMut<GenerationTask>,
+    mut particle_erosion: ResMut<ParticleErosionState>,
     bg_query: Query<Entity, With<Background>>,
 ) {
     if !request.0 {
@@ -56,6 +58,11 @@ pub fn regenerate_on_request(
     if let Ok(entity) = bg_query.single() {
         commands.entity(entity).despawn();
     }
+
+    // Reset particle erosion state.
+    particle_erosion.world = None;
+    particle_erosion.paused = true;
+    particle_erosion.frame_count = 0;
 
     // Kick off new generation on a background thread.
     let new_seed = rand::random::<u32>();
@@ -81,6 +88,7 @@ pub fn poll_generation(
     mut contour_entities: ResMut<ContourEntities>,
     mut status: ResMut<RegenerateStatus>,
     mut view_sprites: ResMut<ViewSprites>,
+    mut particle_erosion: ResMut<ParticleErosionState>,
 ) {
     let cell = match gen_task.cell.take() {
         Some(c) => c,
@@ -99,6 +107,7 @@ pub fn poll_generation(
             &mut meshes,
             &mut contour_entities,
             &mut view_sprites,
+            &mut particle_erosion,
         );
         status.remaining = 0.0;
         status.label.clear();
@@ -164,5 +173,162 @@ pub fn sync_view_visibility(
         } else {
             Visibility::Hidden
         };
+    }
+}
+
+// ── Particle erosion systems ───────────────────────────────────────
+
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+/// Toggle particle erosion paused state on key E; cycle overlay on key M.
+pub fn particle_erosion_toggle(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut state: ResMut<ParticleErosionState>,
+) {
+    if keys.just_pressed(KeyCode::KeyE) {
+        // Lazy-init on first unpause.
+        if state.paused && state.world.is_none() {
+            if let Some(ref hm) = state.post_erosion_hm {
+                let scale = crate::config::PARTICLE_SCALE;
+                let pw = (state.hm_width + scale - 1) / scale;
+                let ph = (state.hm_height + scale - 1) / scale;
+                let mut pworld = crate::particle::ParticleWorld::new(
+                    pw,
+                    ph,
+                    rand::random::<u32>(),
+                );
+                pworld.init_from_heightmap_scaled(hm, state.hm_width, state.hm_height, scale);
+                state.world = Some(pworld);
+                info!(
+                    "Particle erosion initialised ({}×{} particle, scale={}) — unpaused",
+                    pw, ph, scale
+                );
+            }
+        }
+        state.paused = !state.paused;
+        info!("Particle erosion paused: {}", state.paused);
+    }
+
+    if keys.just_pressed(KeyCode::KeyM) {
+        use OverlayMode::*;
+        state.overlay = match state.overlay {
+            None => Discharge,
+            Discharge => Momentum,
+            Momentum => DischargeOnly,
+            DischargeOnly => None,
+        };
+        info!("Overlay: {:?}", state.overlay);
+    }
+
+    // Reset particle erosion to initial state.
+    if keys.just_pressed(KeyCode::KeyR) {
+        if let Some(ref hm) = state.post_erosion_hm {
+            let scale = crate::config::PARTICLE_SCALE;
+            let pw = (state.hm_width + scale - 1) / scale;
+            let ph = (state.hm_height + scale - 1) / scale;
+            let mut pworld = crate::particle::ParticleWorld::new(pw, ph, rand::random::<u32>());
+            pworld.init_from_heightmap_scaled(hm, state.hm_width, state.hm_height, scale);
+            state.world = Some(pworld);
+            state.frame_count = 0;
+            state.paused = true;
+            info!("Particle erosion reset — paused");
+        }
+    }
+}
+
+/// Run one particle-erosion cycle per frame and update the background texture.
+pub fn particle_erosion_step(
+    mut state: ResMut<ParticleErosionState>,
+    mut images: ResMut<Assets<Image>>,
+    bg_query: Query<&Sprite, With<Background>>,
+) {
+    if state.paused {
+        return;
+    }
+
+    let overlay = state.overlay;
+    let scale = crate::config::PARTICLE_SCALE;
+    let display_w = state.hm_width;
+    let display_h = state.hm_height;
+    let fc = state.frame_count;
+
+    // Scoped mutable borrow: run erosion, extract heights.
+    let heights = {
+        let Some(world) = state.world.as_mut() else {
+            return;
+        };
+        let t0 = std::time::Instant::now();
+        let cycles = world.map.width.min(world.map.height);
+        world.erode(cycles);
+        let elapsed = t0.elapsed();
+
+        let heights = if scale == 1 {
+            world.extract_heights()
+        } else {
+            world.extract_heights_scaled(display_w, display_h)
+        };
+
+        // Performance log every 60 frames.
+        if fc % 60 == 0 {
+            info!(
+                "Particle erode: {}µs ({}×{} grid, {} droplets)",
+                elapsed.as_micros(),
+                world.map.width,
+                world.map.height,
+                cycles,
+            );
+        }
+
+        heights
+    };
+    state.frame_count += 1;
+
+    // Diagnostic: log height range every 60 frames.
+    if state.frame_count % 60 == 1 {
+        let h_min = heights.iter().copied().reduce(f32::min).unwrap_or(0.0);
+        let h_max = heights.iter().copied().reduce(f32::max).unwrap_or(1.0);
+        info!(
+            "Particle frame {}: height [{:.6}, {:.6}], paused={}, overlay={:?}",
+            state.frame_count, h_min, h_max, state.paused, overlay
+        );
+    }
+
+    // Rebuild display texture from current heights (always at display resolution).
+    let mut pixels = crate::render::render_heightmap(
+        &heights,
+        display_w,
+        display_h,
+        -0.2,              // sea_level
+        0.9,               // snow_level
+        [-0.2, -0.5, 0.7], // light_dir
+        0.35,              // ambient
+        6.0,               // normal_strength
+    );
+
+    // Apply flow-data overlay if active (only when scale=1, else resolution mismatch).
+    if overlay != OverlayMode::None && scale == 1 {
+        if let Some(ref world) = state.world {
+            crate::render::blend_overlay(&mut pixels, &world.map, overlay);
+        }
+    }
+
+    let new_image = Image::new(
+        Extent3d {
+            width: display_w as u32,
+            height: display_h as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+
+    // Update the background sprite's texture.
+    for sprite in bg_query.iter() {
+        if let Some(existing) = images.get_mut(&sprite.image) {
+            *existing = new_image;
+            break;
+        }
     }
 }

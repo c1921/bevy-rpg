@@ -83,6 +83,55 @@ pub struct ViewSprites {
     pub entities: std::collections::HashMap<ViewKind, Entity>,
 }
 
+// ── Particle erosion ──────────────────────────────────────────────
+
+/// Overlay mode for visualising particle-erosion flow data.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum OverlayMode {
+    #[default]
+    None,
+    /// Blue-white river map (discharge).
+    Discharge,
+    /// Red-green flow-direction map (momentum).
+    Momentum,
+    /// Pure discharge on black background (river-only view).
+    DischargeOnly,
+}
+
+/// Particle-erosion runtime state. Lazy-initialised from the
+/// post-hydraulic-erosion heightmap on first unpause.
+#[derive(Resource)]
+pub struct ParticleErosionState {
+    /// The particle world; None until first unpause triggers lazy init.
+    pub world: Option<crate::particle::ParticleWorld>,
+    /// Whether particle erosion is paused. Starts `true`.
+    pub paused: bool,
+    /// Number of erosion cycles executed so far.
+    pub frame_count: u64,
+    /// Current flow-data overlay.
+    pub overlay: OverlayMode,
+    /// Stored post-erosion heightmap for lazy initialisation.
+    pub post_erosion_hm: Option<Vec<f32>>,
+    /// Width of the heightmap.
+    pub hm_width: usize,
+    /// Height of the heightmap.
+    pub hm_height: usize,
+}
+
+impl Default for ParticleErosionState {
+    fn default() -> Self {
+        Self {
+            world: None,
+            paused: true,
+            frame_count: 0,
+            overlay: OverlayMode::default(),
+            post_erosion_hm: None,
+            hm_width: 0,
+            hm_height: 0,
+        }
+    }
+}
+
 // ── Async generation ───────────────────────────────────────────────
 
 /// Fully‑computed generation data, ready for asset creation on the main thread.
@@ -100,6 +149,13 @@ pub struct GenerationResult {
     pub processed_noise_hm: Vec<f32>,
     /// processed_noise_hm re-normalized to strict [0,1] (same scale as Final).
     pub compressed_norm_hm: Vec<f32>,
+    /// Post-hydraulic-erosion heightmap, normalised to [0, 1] (f32).
+    /// Used to initialise particle erosion.
+    pub post_erosion_hm: Vec<f32>,
+    /// Width of post_erosion_hm (columns).
+    pub hm_cols: usize,
+    /// Height of post_erosion_hm (rows).
+    pub hm_rows: usize,
 }
 
 /// State for background terrain generation.

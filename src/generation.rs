@@ -6,7 +6,7 @@ use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 
 use crate::config::{CONTOUR_INTERVAL, EROSION_PADDING, GRID_COLS, GRID_ROWS, LINE_WIDTH, MAX_HEIGHT, WORLD_HALF, WORLD_SIZE};
 use crate::contour::{marching_squares_from_flat, ContourLevel};
-use crate::resources::{Background, ContourData, ContourEntities, GenerationResult, IntermediateView, RenderMode, ViewKind, ViewSprites};
+use crate::resources::{Background, ContourData, ContourEntities, GenerationResult, IntermediateView, ParticleErosionState, RenderMode, ViewKind, ViewSprites};
 use crate::terrain::Terrain;
 
 /// Pure computation: noise → erosion → render pixels → contour extraction.
@@ -149,6 +149,9 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
         initial_noise_hm,
         processed_noise_hm,
         compressed_norm_hm,
+        post_erosion_hm: bg_f32.clone(),
+        hm_cols: cols,
+        hm_rows: rows,
     }
 }
 
@@ -164,6 +167,7 @@ pub fn apply_result(
     meshes: &mut ResMut<Assets<Mesh>>,
     contour_entities: &mut ResMut<ContourEntities>,
     view_sprites: &mut ResMut<ViewSprites>,
+    particle_erosion: &mut ResMut<ParticleErosionState>,
 ) -> Handle<Image> {
     info!(
         "apply_result seed={}  levels={}  total-segments={}",
@@ -273,6 +277,14 @@ pub fn apply_result(
     view_sprites.entities.insert(ViewKind::InitialNoise, ent_init);
     view_sprites.entities.insert(ViewKind::ProcessedNoise, ent_proc);
     view_sprites.entities.insert(ViewKind::CompressedNorm, ent_cnorm);
+
+    // ── Initialise particle erosion state (lazy, paused by default) ──
+    particle_erosion.world = None; // lazy-init on first unpause
+    particle_erosion.paused = true;
+    particle_erosion.frame_count = 0;
+    particle_erosion.post_erosion_hm = Some(result.post_erosion_hm);
+    particle_erosion.hm_width = result.hm_cols;
+    particle_erosion.hm_height = result.hm_rows;
 
     bg_handle
 }

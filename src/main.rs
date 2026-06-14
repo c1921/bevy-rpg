@@ -3,6 +3,7 @@ mod config;
 mod contour;
 mod erosion;
 mod generation;
+mod particle;
 mod render;
 mod resources;
 mod systems;
@@ -12,12 +13,13 @@ mod ui;
 use bevy::prelude::*;
 use camera::{camera_control, CameraDrag};
 use resources::{
-    ContourEntities, GenerationTask, RegenerateRequest, RegenerateStatus, RenderMode,
-    ViewMode, ViewSprites,
+    ContourEntities, GenerationTask, ParticleErosionState, RegenerateRequest,
+    RegenerateStatus, RenderMode, ViewMode, ViewSprites,
 };
 use systems::{
-    maintain_generation_label, poll_generation, regenerate_on_request, setup,
-    sync_contour_visibility, sync_view_visibility,
+    maintain_generation_label, particle_erosion_step, particle_erosion_toggle,
+    poll_generation, regenerate_on_request, setup, sync_contour_visibility,
+    sync_view_visibility,
 };
 use ui::{regenerate_button, spawn_ui, toggle_render_mode, select_view_mode, update_status};
 
@@ -39,6 +41,7 @@ fn main() {
         .init_resource::<ViewMode>()
         .init_resource::<ViewSprites>()
         .init_resource::<GenerationTask>()
+        .init_resource::<ParticleErosionState>()
         .add_systems(Startup, (setup, spawn_ui))
         .add_systems(
             Update,
@@ -55,5 +58,12 @@ fn main() {
             ),
         )
         .add_systems(Update, (sync_contour_visibility,))
+        .add_systems(
+            Update,
+            (
+                particle_erosion_toggle,
+                particle_erosion_step,
+            ),
+        )
         .run();
 }
