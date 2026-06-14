@@ -53,12 +53,12 @@ pub fn compute_raw(seed: u32) -> GenerationResult {
     // Capture initial noise (simple [0,1] normalised, cropped to visible region).
     let initial_noise_hm: Vec<f32> = hm.crop_normalized_f32(pad, cols, rows);
 
-    // Normalize to [0,1] then remap [0, 0.45] → [0.4, 0.45] to compress
-    // underwater relief before erosion, so erosion works on the remapped data.
+    // Normalize to [0,1] then remap [0, 0.45] → [0.3, 0.45] to compress
+    // low-elevation relief before erosion, so erosion works on the remapped data.
     hm.data.iter_mut().for_each(|v| {
         let n = (*v - h_min) / h_range;
         *v = if n <= 0.45 {
-            0.4 + n * (0.05 / 0.45)
+            0.3 + n * (0.15 / 0.45)
         } else {
             n
         };

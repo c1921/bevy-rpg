@@ -145,7 +145,7 @@ pub struct GenerationResult {
     pub data: ContourData,
     /// Initial noise heightmap, normalized to [0, 1] (f32).
     pub initial_noise_hm: Vec<f32>,
-    /// Heightmap after underwater compression, before erosion (f32).
+    /// Heightmap after low-elevation compression, before erosion (f32).
     pub processed_noise_hm: Vec<f32>,
     /// processed_noise_hm re-normalized to strict [0,1] (same scale as Final).
     pub compressed_norm_hm: Vec<f32>,
